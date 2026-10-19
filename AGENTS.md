@@ -55,6 +55,22 @@ serial-shift folklore. Paula owns TXD/RXD (`MR_SERIALPORT`); CIA-B port A
 owns RTS/CTS and the other modem lines (`MR_SERIALBITS`). Process map:
 `docs/amiga/rs232-paula-and-cia-handshake.md`.
 
+## BMad artifact namespaces
+
+`_bmad-output/planning-artifacts/epics.md` and the generic
+`_bmad-output/implementation-artifacts/epic-<N>-context.md` files belong to
+the active Amiga Zorro-II packet-native-backend program. They are not shared
+number spaces and must not be rewritten, regenerated, renamed, or used as
+context for another feature.
+
+The Atari physical-SIO program is independently owned by
+`_bmad-output/planning-artifacts/epics-atari-nio-physical-sio.md` and
+`_bmad-output/specs/spec-atari-nio-physical-sio/`. Its derived contexts and
+implementation specs must use an `atari-nio-physical-sio-` filename prefix
+(for example, `atari-nio-physical-sio-epic-1-context.md`). Before changing a
+BMad planning/context artifact, verify both its feature identity and story
+title. A bare numeric Epic/Story label is never sufficient identification.
+
 ## Amiga DiskDevice status and future media work
 
 Stage 8, its hardening work, and DiskDevice Phase 2 are complete. Do not reopen
