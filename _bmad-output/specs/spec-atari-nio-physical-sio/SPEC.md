@@ -43,9 +43,9 @@ FujiNet-NIO needs Atari to be a first-class host alongside BBC, Amiga, and MS-DO
 ## Constraints
 
 - `0x7F` is permanently reserved for the NIO application channel; it is an SIO address, never a FujiBus service ID. A collision reports NIO unavailable without fallback or discovery.
-- The NIO channel carries packet-native FujiBus, not SLIP. `W` and `R` transfer exact packet sizes up to a shared, compile-time 512-byte limit; oversized packets fail explicitly and are never implicitly segmented.
-- `P` is a fixed three-byte NIO readiness/length poll. `NAK` denotes only malformed or rejected transport transactions, never a pending response.
-- Atari `D1:`–`D8:` disk transactions are a purpose-built standard SIO frontend that translates to internal `IORequest`/`IOResponse` operations for the existing `DiskDevice`/`DiskService`; it shares no framing or service routing with `0x7F`.
+- The NIO channel carries packet-native FujiBus, not SLIP. Every wire-revision-1 device supports `W` and `R` exact packet sizes up to the shared, compile-time 512-byte baseline limit; oversized packets fail explicitly and are never implicitly segmented. An application may optionally issue fixed-size `Q` to discover the device maximum, but no application is required to do so. A smaller capacity requires a new wire revision/profile and may not be advertised as v1.
+- `P` is a fixed three-byte NIO readiness/length poll: byte 0 is `0` idle, `1` pending, or `2` ready; its little-endian length is nonzero only when ready. `NAK` denotes only malformed or rejected transport transactions, never a pending response.
+- Atari `D1:`–`D8:` disk transactions are a purpose-built standard SIO frontend that composes the existing `DiskService` directly; it shares slot/media state, but no framing or routing, with the `0x7F` FujiBus path through `DiskDevice`.
 - Config mode prepares the flashed configuration ATR as the `D1:` candidate; normal mode restores configured URI-backed disk slots. The boot disk contains the cc65 XEX configuration and acceptance programs.
 - PROC is opt-in and application-owned. The library supplies only an ISR-safe notification hook and remains polling-correct; it never installs or replaces an Atari IRQ handler.
 - Physical v1 NIO requires CMD and UART data lines at 19,200 baud. Board-driven data output and PROC are released-idle open-drain; INT, MTR, CKI, and CKO are electrically benign and have no NIO semantics.

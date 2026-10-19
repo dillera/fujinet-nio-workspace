@@ -5,13 +5,12 @@
 ```text
 Atari OS boot / mounted applications
   -> standard SIO D1:–D8: disk frontend
-  -> internal IORequest / IOResponse
-  -> DiskDevice -> DiskService -> ATR slots
+  -> DiskService -> ATR slots
 
 Atari NIO application
   -> public fujinet-nio-lib API
   -> packet-native FujiBus
-  -> SIO device 0x7F: W / P / R
+  -> SIO device 0x7F: Q / W / P / R
   -> internal FujiBus transport -> FujinetCore -> existing services
 ```
 
@@ -22,12 +21,13 @@ The planes share physical SIO, board configuration, disk-slot state, and core Di
 | Concern | Contract |
 | --- | --- |
 | Address | SIO device `0x7F` is permanently the NIO application-channel address. It is unrelated to FujiBus `WireDeviceId` values such as Clock, Disk, Network, and File. |
-| Request | `W` has matching AUX and DCB byte counts and carries exactly one packet-native FujiBus request plus its standard SIO checksum. Valid receipt returns ACK then COMPLETE. |
-| Poll | `P` returns ACK, COMPLETE, then exactly three bytes: state (`idle`, `pending`, `ready`, or `fault`) and little-endian queued-response size. |
-| Response | After `P=ready`, `R` has matching AUX and DCB byte counts equal to the reported size and returns exactly one packet-native FujiBus response plus the SIO checksum. No zero padding is used. |
-| Capacity | One shared named compile-time constant initially limits a `W` or `R` payload to 512 bytes. Builds may tune it together for measured compatibility/performance. A larger packet fails with the defined NIO message-too-large transport error; no implicit segmentation exists. |
-| Errors | `NAK` means malformed/rejected SIO transaction only: bad command/checksum, invalid length, bad state, or another transport rejection. It never means pending. Service failures remain encoded in the FujiBus response. |
-| Recovery | Only one NIO request may be outstanding. Abort, timeout, malformed `W`, or terminal `R` failure clears pending request and queued response before another `W`; no response may leak into a later request. Client retry delay and total deadline are configurable policy, not wire constants. |
+| Capability query | `Q` is an optional, direct fixed-size query. The client/fixture uses AUX `0` and DCB receive length `4`; at `P=idle`, the device returns ACK, COMPLETE, then four bytes: wire revision `1`, little-endian advertised maximum payload (at least 512 for v1), and feature flags. Bit 0 advertises advisory PROC readiness notification; all other bits are zero and ignored by v1 clients. The device validates AUX and state—not DCB length, which is not observable on the SIO wire—and rejects nonzero AUX or `Q` while pending/ready with `NAK`. `Q` neither creates nor consumes a `W`/`P`/`R` transaction. |
+| Request | The client/fixture uses matching AUX and DCB byte counts for `W`; it carries exactly one packet-native FujiBus request plus its standard SIO checksum. It is valid only at `P=idle`; a `W` while pending or ready is rejected with `NAK`. Valid receipt returns ACK then COMPLETE. |
+| Poll | The client/fixture uses `P` AUX `0` and DCB receive length `3`; the device returns ACK, COMPLETE, then exactly three bytes: state `0=idle`, `1=pending`, or `2=ready`, then a little-endian queued-response size which is nonzero only for `ready`. |
+| Response | After `P=ready`, the client/fixture uses `R` AUX and DCB byte counts equal to the reported size and the device returns exactly one packet-native FujiBus response plus the SIO checksum. A wrong observable `R` AUX length or bad command frame is rejected with `NAK` and retains the response. Once a valid `R` is accepted, its response slot is consumed and the next `P` is idle even if the data transfer is interrupted at the client. No zero padding is used. |
+| Capacity | One shared named compile-time constant initially limits a `W` or `R` payload to 512 bytes. Builds may tune it together for measured compatibility/performance. A v1 device must support this full baseline. A client that elects to query uses the lesser of its compiled capacity and the advertised `Q` maximum; a client that does not query uses the 512-byte v1 baseline. A lower-capacity profile requires a new wire revision and matching fixtures. A larger packet fails with the defined NIO message-too-large transport error; no implicit segmentation exists. |
+| Errors | `NAK` means malformed/rejected SIO transaction only: bad command/checksum, invalid length, bad state, or another transport rejection. It never means pending. Every valid request, including a service or transport error, yields a normal FujiBus response; `P` carries no fault or request flags. |
+| Recovery | Only one NIO request may be outstanding. A local client timeout does not cancel or forget an accepted request: later traffic first observes its state with `P`, and a valid terminal `R` attempt clears its queued response. A malformed or rejected `W` does not create a transaction; device reset clears one. The library never retries automatically after timeout; application retry remains safe only where the operation semantics permit it. Client retry delay and total deadline are configurable policy, not wire constants. |
 
 ### PROC readiness notification
 
@@ -41,7 +41,7 @@ The default backend polls `P`. An application that owns or chains the Atari PROC
 ## Disk bootstrap and configured drives
 
 - Standard Atari disk device IDs `D1:`–`D8:` select the corresponding runtime DiskService slots.
-- The frontend handles only the standard Atari disk commands and sector/status semantics required for ATR-backed boot and mounted-media operation. It translates them into internal DiskDevice IORequests and maps the resulting IOResponses to standard SIO replies.
+- The frontend handles only the standard Atari disk commands and sector/status semantics required for ATR-backed boot and mounted-media operation. It composes DiskService directly and maps its results to standard SIO replies; `DiskDevice` remains the separate FujiBus wrapper.
 - In config mode, `boot.config_uri` identifies the flashed configuration ATR prepared for the active boot slot (`D1:`). In normal mode, restored user URI-backed slots determine which disk responds.
 - The configuration ATR supplies the cc65 XEX configuration and acceptance programs. It is the supported bootstrap medium; loading must not require legacy FujiNet services.
 
@@ -71,6 +71,6 @@ The cc65 XEX loaded from the configuration ATR must use the public library API a
 2. Network open/write/read/close, including delayed readiness through `P` and, where available, the application-owned PROC path.
 3. File persistent write/read.
 4. Disk read/write against a mounted supported image.
-5. Rejected/malformed or aborted NIO transaction recovery followed by a successful exchange.
+5. Rejected `W`, malformed-length `R`, interrupted terminal `R`, and reset recovery followed by a successful exchange.
 
 The operator procedure documents flash, boot-mode choice, ATR/URI mapping, launch, diagnostics, and the physical evidence record.
