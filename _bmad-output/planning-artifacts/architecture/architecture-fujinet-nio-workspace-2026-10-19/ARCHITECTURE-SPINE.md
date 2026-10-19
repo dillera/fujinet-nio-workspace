@@ -8,7 +8,7 @@ scope: Atari NIO physical SIO cross-repository delivery seams
 status: final
 created: 2026-10-19
 updated: 2026-10-19
-binds: [CAP-1, CAP-2, CAP-3, CAP-4, CAP-5]
+binds: [CAP-1, CAP-2, CAP-3, CAP-4, CAP-5, CAP-6]
 sources:
   - ../../../specs/spec-atari-nio-physical-sio/SPEC.md
   - ../../../specs/spec-atari-nio-physical-sio/wire-and-acceptance.md
@@ -25,8 +25,11 @@ flowchart LR
   subgraph Atari
     OS[Atari OS D1-D8]
     APP[Atari NIO app]
+    BASIC[Atari BASIC N:]
     LIB[fujinet-nio-lib]
     APP --> LIB
+    BASIC --> HANDLER[Native CIO N: handler]
+    HANDLER --> LIB
   end
   LIB -->|0x7F Q W P R| MUX
   OS -->|D1-D8 sector SIO| MUX
@@ -65,7 +68,7 @@ flowchart LR
 
 ### AD-4 — Atari library is an application-channel client [ADOPTED]
 
-- **Binds:** CAP-2, CAP-5
+- **Binds:** CAP-2, CAP-5, CAP-6
 - **Prevents:** cc65 applications embedding disk emulation, owning NIO service codecs, or hijacking Atari interrupt vectors.
 - **Rule:** `repos/fujinet-nio-lib` owns public-API use, `0x7F` exchange, bounded buffers, configurable deadline/retry policy, polling, and an ISR-safe PROC flag hook. It exposes capability discovery as an explicit opt-in; ordinary applications start at the 512-byte baseline and do not issue `Q`. It does not implement `D:` behavior, install/replace `VPRCED`, or make a PROC pulse a correctness dependency.
 
@@ -99,6 +102,12 @@ flowchart LR
 - **Prevents:** a passing virtual regression silently exercising SLIP, padded reads, or an old `0x71` device alias instead of the adopted `0x7F` protocol.
 - **Rule:** The Atari backend, ESP32 channel, NetSIO adapter, AltirraSDL adapter, profile selection, and their conformance tests replace SLIP framing, padded `R`, and `0x71` aliases with the exact v1 `0x7F` contract. Legacy-only tests may remain as historical coverage but are excluded from Atari NIO v1 conformance and acceptance.
 
+### AD-10 — BASIC N: is a native client adapter [ADOPTED]
+
+- **Binds:** CAP-2, CAP-5, CAP-6
+- **Prevents:** the user-facing `N1:` syntax pulling `0x71`–`0x78`, legacy `O/C/R/W/S` framing, or `LegacyTransport` back into native Atari NIO.
+- **Rule:** The supported startup/config ATR installs a CIO `N:` handler following the BBC adapter model, resident below adjusted `MEMLO`; it calls `fn_init` before usable `HATABS` registration and rolls back on failure. Same-handler installation is idempotent; a foreign `N:` entry is a collision. CIO `OPEN` maps its Atari IOCB to the `fn_handle_t` returned by public `fn_open`; read/write/update maps to GET/PUT/POST, with write/update setting `FN_OPEN_BODY_UNKNOWN`. GET/PUT use bounded 128-byte per-open IOCB caches; after flush, write/update commits exactly once by zero-length `fn_write` before first STATUS/read/CLOSE; STATUS calls `fn_info`, and CLOSE then calls `fn_close`. The handler adds no retry beyond library policy. `N1:` is user syntax, not a network-slot protocol; capacity is the existing library session limit. The handler owns only Atari CIO/IOCB adaptation, and must not address legacy SIO network IDs or invoke compatibility adapters.
+
 ## Consistency Conventions
 
 | Concern | Convention |
@@ -107,16 +116,16 @@ flowchart LR
 | Service routing | `WireDeviceId` exists inside FujiBus only; no SIO device address is a FujiBus service selector. |
 | Shared state | The multiplexer owns one active NIO transaction; DiskService owns slots, media, and boot/runtime mount state. |
 | Errors and observability | NIO transport rejection uses `NAK`; application/service outcomes remain FujiBus responses; every adapter records the same scenario/vector identifier. |
-| Compatibility | No `LegacyTransport`, legacy FujiNet framing, `N:`/`R:`, proprietary commands, SLIP on `0x7F`, or high-speed claim. |
+| Compatibility | No `LegacyTransport`, legacy FujiNet framing, legacy `N:`/`R:` wire behavior, proprietary commands, SLIP on `0x7F`, or high-speed claim. The native CIO `N:` handler is governed by AD-10. |
 
 ## Structural Seed
 
 ```text
 repos/
   fujinet-nio-lib/       # Atari public API backend and optional PROC hook
+  nio-config/            # configuration XEX, N: handler startup, URI-to-D1-D8 mapping
   fujinet-nio/           # SIO multiplexer, ESP32 channel, DiskDevice integration, NetSIO channel
   AltirraSDL/             # independent embedded-SIO conformance adapter
-  nio-config/             # configuration XEX and URI-to-D1-D8 mapping
 integration-tests/
   atari-sio/              # [ASSUMPTION] canonical literal vectors and scenarios
 _bmad-output/
@@ -128,10 +137,11 @@ _bmad-output/
 | Capability / Area | Lives in | Governed by |
 | --- | --- | --- |
 | CAP-1 SIO contract and disk split | `fujinet-nio`, literal fixtures | AD-1, AD-2, AD-3, AD-7 |
-| CAP-2 Atari library and configuration | `fujinet-nio-lib`, `nio-config` | AD-3, AD-4, AD-6 |
+| CAP-2 Atari library and configuration | `fujinet-nio-lib`, `nio-config` | AD-3, AD-4, AD-6, AD-10 |
 | CAP-3 ESP32 physical profile | `fujinet-nio` ESP32 platform | AD-1, AD-5, AD-6, AD-8 |
 | CAP-4 AltirraSDL and NetSIO | `AltirraSDL`, `fujinet-nio` POSIX platform | AD-3, AD-7, AD-8 |
 | CAP-5 operator acceptance | `fujinet-nio` docs/profiles and workspace evidence | AD-5, AD-6, AD-8 |
+| CAP-6 native BASIC N: | `nio-config`, `fujinet-nio-lib` | AD-4, AD-10 |
 
 ## Deferred
 

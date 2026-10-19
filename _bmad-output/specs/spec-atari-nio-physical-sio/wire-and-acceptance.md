@@ -12,9 +12,16 @@ Atari NIO application
   -> packet-native FujiBus
   -> SIO device 0x7F: Q / W / P / R
   -> internal FujiBus transport -> FujinetCore -> existing services
+
+Atari BASIC
+  -> native CIO N: handler from supported startup/config ATR
+  -> public fujinet-nio-lib API
+  -> SIO device 0x7F -> NetworkService URI + handle operations
 ```
 
 The planes share physical SIO, board configuration, disk-slot state, and core DiskDevice. They do not share framing or dispatch. The disk frontend is a narrowly scoped standard Atari disk adapter, not `LegacyTransport` and not a legacy FujiNet compatibility path.
+
+The CIO `N:` handler is likewise native: it is an Atari-side API adapter, not an SIO network-device alias. The startup/config ATR installs it resident below adjusted `MEMLO`, calls `fn_init`, and registers `HATABS`; failure rolls back installation, the same handler may be reinstalled idempotently, and a foreign `N:` entry is a reported collision. CIO `OPEN` associates the returned public `fn_handle_t` with the Atari IOCB; read/write/update maps to GET/PUT/POST, with write/update setting `FN_OPEN_BODY_UNKNOWN`. GET/PUT use bounded 128-byte per-open IOCB caches; after flushing, write/update commits exactly once with zero-length `fn_write` before first STATUS, read, or CLOSE; STATUS calls `fn_info`; CLOSE then closes the handle. It adds no retry beyond existing library policy. It must not address `0x71`–`0x78`, translate legacy `O/C/R/W/S` frames, or invoke `LegacyTransport`.
 
 ## NIO application-channel contract
 
@@ -72,5 +79,6 @@ The cc65 XEX loaded from the configuration ATR must use the public library API a
 3. File persistent write/read.
 4. Disk read/write against a mounted supported image.
 5. Rejected `W`, malformed-length `R`, interrupted terminal `R`, and reset recovery followed by a successful exchange.
+6. A native Atari BASIC `N1:` URI open, stream I/O/status, and close using the installed CIO handler and NetworkService.
 
 The operator procedure documents flash, boot-mode choice, ATR/URI mapping, launch, diagnostics, and the physical evidence record.
