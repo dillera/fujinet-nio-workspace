@@ -44,3 +44,7 @@
 [submodule "repos/fujinet-nio-hardware"]
 	path = repos/fujinet-nio-hardware
 	url = git@github.com:markjfisher/fujinet-nio-hardware.git
+[submodule "repos/MyPicoDOS"]
+	path = repos/MyPicoDOS
+	url = https://github.com/markjfisher/MyPicoDOS.git
+	branch = bootq
