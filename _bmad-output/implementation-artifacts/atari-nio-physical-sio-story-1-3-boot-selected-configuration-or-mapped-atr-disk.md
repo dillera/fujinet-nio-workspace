@@ -2,7 +2,7 @@
 title: 'Boot the selected configuration or mapped ATR disk'
 type: 'feature'
 created: '2026-10-20'
-status: 'in-progress'
+status: 'done'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'
@@ -58,8 +58,9 @@ criterion.
   restore-then-project ordering explicit so a future refactor cannot reverse it.
 - The packaged input already exists: `make TARGET=atari boot-disk` stages
   `fhost.xex`, `fls.xex`, `fin.xex`, `fmount.xex`, `fdrive.xex`, and `fapp.xex`
-  from `boot-disk/manifests/atari.yaml`, then uses the cached/downloaded
-  PicoBoot and `dir2atr -m -D -B` to make `build/atari/disk/boot/autorun.atr`.
+  from `boot-disk/manifests/atari.yaml`, builds the pinned MyPicoDOS
+  `picobootcode-dd.bin`, then uses `dir2atr -m -D -B` to make
+  `build/atari/disk/boot/autorun.atr`.
   `install-boot-disk` copies that same image to both firmware boot-asset roots.
   Reuse this pipeline; do not create another ATR builder or commit generated ATRs.
 
@@ -73,8 +74,8 @@ point, but must not make an Epic 2 service assertion.
 ## Atari boot/launch contract for this story
 
 The generated golden currently has SHA-256
-`a4bec3fa87bb0355815d66bb28356222bf0001e4212441e7b5b2eb128a986a20`.
-Its sector 1 header is `80 03 00 08`: standard boot flags, three 128-byte boot
+`8f1cd8f689936ab5c94def50176ecab721f78a739e9aa117b0908c8b255c24f4`.
+Its sector 1 header is `00 03 00 08`: standard boot flags, three 128-byte boot
 sectors, and load address `$0800`.  Atari OS must issue standard `D1:` READ
 command frames (`0x31, 0x52`) for one-based sectors 1, 2, and 3, each with a
 128-byte data transfer and its data checksum.  The boot loader's subsequent
@@ -279,3 +280,68 @@ boot.  There are no remaining policy blockers.
 - The workspace submodule pointer remains unchanged pending a passing virtual
   launch gate.  A named stash retains only generated AltirraBridge Python
   bytecode caches from the earlier probe; it contains no source or settings.
+
+### Source-built DD PicoBoot and virtual launch — 2026-10-20
+
+- `repos/MyPicoDOS` is pinned at `933c1040` on
+  `feature/story-1.3-dd-bootq`.  Its unmodified `bootq` source builds with
+  ATASM 1.30 to the published FujiNet `picoboot.bin` byte-for-byte
+  (`6850ad99d911556fd640e1aca846ec6847218ffc9baf71aab4457e42bf0a5f99`).
+  The DD target changes only the first boot byte from `$80` to `$00`, retaining
+  the existing autorun and linked-XEX loader.
+- `make TARGET=atari boot-disk install-boot-disk` in `repos/nio-core-apps`
+  builds `picobootcode-dd.bin` through the pinned submodule and generated the
+  above `autorun.atr` hash; both POSIX and ESP32 firmware asset copies matched.
+- Native Altirra control (no NIO, hub, or custom device) and the production
+  NIO/NetSIO lane both reached the FAPP launch sentinel `PC=$5060`.  The common
+  DCB trace is standard D1 STATUS, READ 1--3 with `DBYT=$0080`, then READ 361
+  with `DBYT=$0100`, followed by linked file sectors 4, 5, 6, 7, and 8.  The
+  virtual run continued through sector 98 before the same launch breakpoint.
+  Trace logs: `/tmp/story13-native-altirra.log` and
+  `/tmp/atari-story13-run/source-dd-netsio.log`.
+- This is virtual protocol/boot evidence only; it proves neither ESP32
+  electrical/timing behavior nor a real-Atari boot.
+
+### Final verification and completion — 2026-10-20
+
+- The controlled reference found no post-loader transport divergence. With the
+  identical ATR, native Altirra (no NIO, hub, or custom device) and the
+  production NetSIO lane both completed sector 361 at `DBYT=$0100`, traversed
+  the linked program sectors, and stopped at `PC=$5060`. The earlier
+  sector-361 failure was the old `$80` PicoBoot header causing `DBYT=$0080`,
+  not a 256-byte delivery, checksum, or READY-handshake failure.
+- The production trace is
+  `/tmp/atari-story13-run/source-dd-netsio.log`; the native control trace is
+  `/tmp/story13-native-altirra.log`. Their common initial sequence is D1
+  STATUS, READ sectors 1--3 at 128 bytes, READ sector 361 at 256 bytes, then
+  the program's linked-sector traversal. `PC=$5060` is the FAPP launch
+  sentinel, not a claim about any Epic 2 guest acceptance service.
+- The Story 1.1 fixture and projection manifest deliberately pin the new image:
+  sector 1 begins `00 03 00 08`, has checksum `$94`, and image SHA-256 is
+  `8f1cd8f689936ab5c94def50176ecab721f78a739e9aa117b0908c8b255c24f4`.
+  `python3 -m unittest discover -s integration-tests/atari-sio/tests -v`
+  passed all 14 tests.
+- `make picobootcode.bin picobootcode-dd.bin` in `repos/MyPicoDOS` and
+  `make TARGET=atari boot-disk install-boot-disk` in `repos/nio-core-apps`
+  passed. The generated ATR and both installed firmware assets have the same
+  SHA-256 above.
+- `ctest --test-dir repos/fujinet-nio/build/atari-fujibus-netsio-debug
+  --output-on-failure` passed all three tests. A clean
+  `repos/fujinet-nio/./build.sh -cb` linked the classic Atari v1 Debug image;
+  the follow-up `./build.sh -b` size check passed. During that clean build,
+  the ESP32 channel-factory definition was aligned with its existing shared
+  three-argument declaration. It remains behaviorally unchanged and does not
+  add a disk path.
+
+### Execution checklist
+
+- [x] Config boot policy overlay and normal-mode restoration, including missing
+  config and D2--D8 preservation, are covered by the focused bootstrap tests.
+- [x] Source-built DD PicoBoot is reproducible from the pinned MyPicoDOS commit
+  and produces byte-identical installed boot assets.
+- [x] Native Altirra control and production `AtariSioDiskFrontend`/shared
+  `DiskService`/NetSIO boot runs reached the application launch sentinel.
+- [x] Story 1.1 goldens, host regressions, and the clean classic ESP32 build
+  passed.
+- [x] Evidence is explicitly virtual only; real SIO electrical/timing and
+  real-Atari acceptance remain Epic 3 work.

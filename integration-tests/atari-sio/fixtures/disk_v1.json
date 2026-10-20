@@ -112,7 +112,7 @@
   "scenarios": [
     {
       "command": "31 52 01 00 84",
-      "data": "80 03 00 08 3d 09 a2 7d ad 00 08 d0 08 8d 08 03 ee 09 03 a2 fd 86 48 a2 00 8e 04 03 e8 8e 0b 03 a9 07 8d 05 03 a9 69 8d 0a 03 a9 40 8d 03 03 20 59 e4 ad 00 07 29 04 f0 05 a9 ff 8d 2b 09 a4 48 ad 03 07 99 01 07 ad 04 07 99 00 07 a9 3d 8d e2 02 a9 09 8d e3 02 20 3e 09 a2 02 20 32 09 85 44 8d e0 02 20 32 09 85 45 8d e1 02 20 32 09 38 e5 44 85 46 08 20 32 09 28 e5 45 85 47 e6 46 e6 47",
+      "data": "00 03 00 08 3d 09 a2 7d ad 00 08 d0 08 8d 08 03 ee 09 03 a2 fd 86 48 a2 00 8e 04 03 e8 8e 0b 03 a9 07 8d 05 03 a9 69 8d 0a 03 a9 40 8d 03 03 20 59 e4 ad 00 07 29 04 f0 05 a9 ff 8d 2b 09 a4 48 ad 03 07 99 01 07 ad 04 07 99 00 07 a9 3d 8d e2 02 a9 09 8d e3 02 20 3e 09 a2 02 20 32 09 85 44 8d e0 02 20 32 09 85 45 8d e1 02 20 32 09 38 e5 44 85 46 08 20 32 09 28 e5 45 85 47 e6 46 e6 47",
       "device": "0x31",
       "geometry": "geo-classic-256",
       "id": "boot-config-read-sector-1",
@@ -124,7 +124,7 @@
         "A",
         "C",
         "data:128",
-        "sum:15"
+        "sum:94"
       ],
       "sector": 1,
       "selection": "boot.config_uri only",
@@ -1097,7 +1097,7 @@
   "scope": "virtual protocol evidence only; no physical timing or electrical claim",
   "source_image": {
     "path": "repos/nio-core-apps/build/atari/disk/boot/autorun.atr",
-    "sha256": "a4bec3fa87bb0355815d66bb28356222bf0001e4212441e7b5b2eb128a986a20",
+    "sha256": "8f1cd8f689936ab5c94def50176ecab721f78a739e9aa117b0908c8b255c24f4",
     "atr_header": "96 02 e8 2c 00 01 00 00 00 00 00 00 00 00 00 00",
     "atr_header_bytes": 16,
     "geometry": "classic-256",
@@ -1105,9 +1105,9 @@
       "1": {
         "atr_offset": 16,
         "bytes": 128,
-        "data": "80 03 00 08 3d 09 a2 7d ad 00 08 d0 08 8d 08 03 ee 09 03 a2 fd 86 48 a2 00 8e 04 03 e8 8e 0b 03 a9 07 8d 05 03 a9 69 8d 0a 03 a9 40 8d 03 03 20 59 e4 ad 00 07 29 04 f0 05 a9 ff 8d 2b 09 a4 48 ad 03 07 99 01 07 ad 04 07 99 00 07 a9 3d 8d e2 02 a9 09 8d e3 02 20 3e 09 a2 02 20 32 09 85 44 8d e0 02 20 32 09 85 45 8d e1 02 20 32 09 38 e5 44 85 46 08 20 32 09 28 e5 45 85 47 e6 46 e6 47",
-        "checksum": "15",
-        "sha256": "369b081114e6805dfba5858a90d5e950e41ff90d7938791b74d0fa2c0310375d"
+        "data": "00 03 00 08 3d 09 a2 7d ad 00 08 d0 08 8d 08 03 ee 09 03 a2 fd 86 48 a2 00 8e 04 03 e8 8e 0b 03 a9 07 8d 05 03 a9 69 8d 0a 03 a9 40 8d 03 03 20 59 e4 ad 00 07 29 04 f0 05 a9 ff 8d 2b 09 a4 48 ad 03 07 99 01 07 ad 04 07 99 00 07 a9 3d 8d e2 02 a9 09 8d e3 02 20 3e 09 a2 02 20 32 09 85 44 8d e0 02 20 32 09 85 45 8d e1 02 20 32 09 38 e5 44 85 46 08 20 32 09 28 e5 45 85 47 e6 46 e6 47",
+        "checksum": "94",
+        "sha256": "0b936197213ee819713e34458f5382e687fc350324d6005bb66d5dd5bc1a419d"
       },
       "2": {
         "atr_offset": 144,
