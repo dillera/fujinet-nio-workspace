@@ -10,6 +10,19 @@ IDs are the identifiers an adapter reports; it must not be regenerated from a
 production framer.  `disk_v1.manifest.json` projects those scenarios as ordered
 SIO phases for virtual consumers.
 
+The config boot READ vectors are pinned source-image goldens, unlike the
+synthetic framing vectors elsewhere in the matrix.  They come from
+`repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is
+recorded in `source_image`.  To reproduce them without an adapter, verify the
+hash and extract the ATR payload slices after its 16-byte header: sectors 1--3
+are 128 bytes at offsets 16, 144, and 272; sector 4 is 256 bytes at offset 400.
+
+```sh
+sha256sum repos/nio-core-apps/build/atari/disk/boot/autorun.atr
+od -An -v -tx1 -j 16 -N 128 repos/nio-core-apps/build/atari/disk/boot/autorun.atr
+od -An -v -tx1 -j 400 -N 256 repos/nio-core-apps/build/atari/disk/boot/autorun.atr
+```
+
 The command frame is always five literal bytes: device, command, AUX1, AUX2,
 and Atari end-around-carry checksum.  Disk devices `0x31`--`0x38` route to
 DiskService slots 0--7.  Sectors are one-based and map to LBA `sector - 1`.

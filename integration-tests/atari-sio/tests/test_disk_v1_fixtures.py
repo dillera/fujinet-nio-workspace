@@ -1,11 +1,13 @@
 """Stdlib-only consistency checks for the literal Atari Disk SIO v1 contract."""
 
 import json
+import hashlib
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
+WORKSPACE = ROOT.parents[1]
 FIXTURE = json.loads((ROOT / "fixtures" / "disk_v1.json").read_text())
 MANIFEST = json.loads((ROOT / "fixtures" / "disk_v1.manifest.json").read_text())
 SUPPORTED = {0x50, 0x52, 0x53, 0x57}
@@ -116,6 +118,65 @@ class DiskV1FixtureTests(unittest.TestCase):
                 else:
                     self.assertEqual(item["postimage"], item["write_data"])
 
+    def test_pinned_autorun_boot_goldens_are_literal_payload_slices(self):
+        source = FIXTURE["source_image"]
+        image = WORKSPACE / source["path"]
+        self.assertEqual(source["atr_header_bytes"], 16)
+        self.assertEqual(source["atr_header"], "96 02 e8 2c 00 01 00 00 00 00 00 00 00 00 00 00")
+        self.assertEqual(source["sha256"], "a4bec3fa87bb0355815d66bb28356222bf0001e4212441e7b5b2eb128a986a20")
+        for sector in range(1, 5):
+            golden = source["sectors"][str(sector)]
+            literal = octets(golden["data"])
+            self.assertNotEqual(literal, b"\\0" * len(literal))
+            self.assertEqual(checksum(literal), int(golden["checksum"], 16))
+            self.assertEqual(hashlib.sha256(literal).hexdigest(), golden["sha256"])
+            scenario = self.by_id[f"boot-config-read-sector-{sector}"]
+            self.assertEqual(octets(scenario["data"]), literal)
+            self.assertEqual(scenario["source_image_sector"], sector)
+        if image.exists():
+            payload = image.read_bytes()
+            self.assertEqual(payload[:source["atr_header_bytes"]], octets(source["atr_header"]))
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), source["sha256"])
+            for golden in source["sectors"].values():
+                self.assertEqual(octets(golden["data"]), payload[golden["atr_offset"]:golden["atr_offset"] + golden["bytes"]])
+
+    def test_command_phases_follow_the_normative_v1_grammar(self):
+        for item in self.scenarios:
+            command = octets(item["command"])
+            if len(command) != 5 or item.get("malformed") == "checksum" or item.get("unsupported"):
+                continue
+            kind = command[1]
+            phases = item["phases"]
+            if kind == 0x52:
+                if phases == ["A", "E"]:
+                    continue
+                self.assertEqual(phases, ["A", "C", next(p for p in phases if p.startswith("data:")), next(p for p in phases if p.startswith("sum:"))], item["id"])
+            elif kind == 0x53:
+                self.assertEqual(phases[:2], ["A", "C"], item["id"])
+            elif kind in (0x50, 0x57):
+                self.assertEqual(phases[:2], ["A", next(p for p in phases if p.startswith("host-data:"))], item["id"])
+                self.assertIn(phases[2:], (["N"], ["A", "C"], ["A", "E"]), item["id"])
+
+    def test_structured_projection_state_and_effects_are_reproducible(self):
+        projections = {entry["id"]: entry for entry in MANIFEST["projections"]}
+        for item in self.scenarios:
+            self.assertIsInstance(item["initial_state"], dict, item["id"])
+            self.assertIsInstance(item["effects"], dict, item["id"])
+            self.assertEqual(projections[item["id"]]["preconditions"], item["initial_state"])
+            self.assertEqual(projections[item["id"]]["effects"], item["effects"])
+
+    def test_write_success_has_nonzero_classic_256_readback_successor(self):
+        write = self.by_id["normal-restored-write-verify"]
+        readback = self.by_id["normal-restored-write-verify-readback"]
+        self.assertEqual(write["geometry"], "geo-classic-256")
+        self.assertNotEqual(octets(write["initial_image"]), octets(write["write_data"]))
+        self.assertNotEqual(octets(write["write_data"]), b"\\0" * 256)
+        self.assertEqual(len(octets(write["write_data"])), 256)
+        self.assertEqual(checksum(octets(write["write_data"])), int(write["write_sum"], 16))
+        self.assertEqual(readback["predecessor"], write["id"])
+        self.assertEqual(readback["data"], write["postimage"])
+        self.assertEqual(readback["phases"][-1], f"sum:{write['write_sum']}")
+
     def test_geometry_acceptance_and_rejection_vectors(self):
         self.assertEqual(set(self.geometries), {"geo-128", "geo-classic-256", "geo-malformed-128", "geo-malformed-small-256", "geo-ordinary-512"})
         for geometry in self.geometries.values():
@@ -150,8 +211,9 @@ class DiskV1FixtureTests(unittest.TestCase):
                 prior = self.by_id[item["predecessor"]]
                 self.assertEqual((item["device"], item["slot"]), (prior["device"], prior["slot"]), item["id"])
                 self.assertIn("status_after", prior, item["id"])
-                status_phase = next(phase for phase in item["phases"] if phase.startswith("status:"))
-                self.assertEqual(status_phase.split(":", 1)[1], prior["status_after"], item["id"])
+                if octets(item["command"])[1] == 0x53:
+                    status_phase = next(phase for phase in item["phases"] if phase.startswith("status:"))
+                    self.assertEqual(status_phase.split(":", 1)[1], prior["status_after"], item["id"])
 
     def test_complete_nonblocking_status_phases_and_clearing(self):
         for item in self.scenarios:
@@ -185,6 +247,17 @@ class DiskV1FixtureTests(unittest.TestCase):
         for identifier, item in self.by_id.items():
             self.assertEqual(projected[identifier]["ordered_phases"], item["phases"], identifier)
             self.assertTrue(projected[identifier]["input_state"])
+
+    def test_invalid_sector_status_chain_is_contiguous_and_clears(self):
+        chain = ["zero-sector-execution-failure", "status-retains-error", "status-retains-error-again", "successful-read-clears-error", "status-after-successful-read"]
+        for previous, current in zip(chain, chain[1:]):
+            item = self.by_id[current]
+            self.assertEqual(item["predecessor"], previous)
+            self.assertEqual((item["device"], item["slot"]), (self.by_id[previous]["device"], self.by_id[previous]["slot"]))
+            self.assertEqual(item["initial_state"], self.by_id[previous]["initial_state"])
+        self.assertEqual(self.by_id["status-retains-error"]["phases"][2], "status:04 cf 0f 00")
+        self.assertEqual(self.by_id["status-retains-error-again"]["phases"][2], "status:04 cf 0f 00")
+        self.assertEqual(self.by_id["status-after-successful-read"]["phases"][2], "status:00 df 0f 00")
 
 
 if __name__ == "__main__":
