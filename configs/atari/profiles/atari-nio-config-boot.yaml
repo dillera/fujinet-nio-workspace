@@ -1,0 +1,26 @@
+machine:
+  system: 800xl
+  video: pal
+  ram_kb: 1088
+  kernel: xl
+  basic: false
+  sio_patch: false
+  accurate_disk: true
+
+altirra:
+  settings_template: configs/atari/settings/altirraSDL-settings.ini
+  rom_roots:
+    os: ${ATARI_OS_ROMS}
+    basic: ${ATARI_BASIC_ROMS}
+  portable: false
+  netsio_command_ack_delay_tics: 1800
+  devices:
+    - type: custom
+      params:
+        hotreload: false
+        path: ${FUJINET_EMULATOR_BRIDGE}/altirra-custom-device/netsio.atdevice
+        allowunsafe: false
+
+# No direct disk attachment: D1: is supplied exclusively through the NetSIO
+# sidecar's shared DiskService boot projection.
+startup: {}

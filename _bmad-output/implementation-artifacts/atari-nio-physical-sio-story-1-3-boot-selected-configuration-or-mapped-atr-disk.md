@@ -41,7 +41,7 @@ criterion.
 - `apply_boot_mount()` correctly stages a config URI lazily (including a network
   filesystem) and `AtariSioDiskFrontend` activates it on the first real disk
   data operation.  `STATUS` remains non-mounting as established by Story 1.1.
-- **Current behavior:** bootstrap restores persisted mappings, then, in config
+- **Previous behavior (superseded):** bootstrap restored persisted mappings, then, in config
   mode, stages `boot.config_uri` only when restored slot 0 is absent.  A
   persisted user `D1:` therefore wins today; config mode supplies the ATR only
   when D1 was not restored.  Normal mode never stages `boot.config_uri`.
