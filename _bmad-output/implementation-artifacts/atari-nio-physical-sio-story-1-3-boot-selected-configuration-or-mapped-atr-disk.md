@@ -2,7 +2,7 @@
 title: 'Boot the selected configuration or mapped ATR disk'
 type: 'feature'
 created: '2026-10-20'
-status: 'done'
+status: 'in-progress'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'
@@ -302,7 +302,16 @@ boot.  There are no remaining policy blockers.
 - This is virtual protocol/boot evidence only; it proves neither ESP32
   electrical/timing behavior nor a real-Atari boot.
 
-### Final verification and completion — 2026-10-20
+### Superseded launch interpretation — 2026-10-20
+
+The prior `$5060` breakpoint was subsequently shown to be insufficient: XL
+Self Test can execute that address before FAPP is loaded. It is retained as
+investigation history only, not launch acceptance. Story 1.3 remains in
+progress until the executable virtual test observes the FAPP bytes at `$5060`,
+actual D1 traffic through the production frontend, and continued application
+execution.
+
+### Prior verification record — 2026-10-20
 
 - The controlled reference found no post-loader transport divergence. With the
   identical ATR, native Altirra (no NIO, hub, or custom device) and the
@@ -339,8 +348,9 @@ boot.  There are no remaining policy blockers.
   config and D2--D8 preservation, are covered by the focused bootstrap tests.
 - [x] Source-built DD PicoBoot is reproducible from the pinned MyPicoDOS commit
   and produces byte-identical installed boot assets.
-- [x] Native Altirra control and production `AtariSioDiskFrontend`/shared
-  `DiskService`/NetSIO boot runs reached the application launch sentinel.
+- [ ] Native Altirra control and production `AtariSioDiskFrontend`/shared
+  `DiskService`/NetSIO boot runs must demonstrate FAPP-specific execution,
+  rather than an address-only breakpoint.
 - [x] Story 1.1 goldens, host regressions, and the clean classic ESP32 build
   passed.
 - [x] Evidence is explicitly virtual only; real SIO electrical/timing and
