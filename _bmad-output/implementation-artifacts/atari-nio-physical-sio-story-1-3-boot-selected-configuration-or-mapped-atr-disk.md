@@ -239,3 +239,43 @@ acceptance scope.  The current virtual sidecar is a genuine implementation gap
 because it is legacy-channel based; the scoped D1--D8 portable-frontend adapter
 and trace capture above are required before the story can claim a virtual Atari
 boot.  There are no remaining policy blockers.
+
+## Implementation evidence
+
+### AltirraSDL upstream refresh — 2026-10-20
+
+- Preserved local NIO range before integration:
+  `d2dc14a1f80cc4cc469f603e5134540633c5e643..23ac3b1de1e94e156b7023963acd962c8f876492`.
+  Safety branch: `safety/story-1.3-pre-upstream-rebase-23ac3b1d`.
+- Rebased the four NIO commits onto `upstream/main` at
+  `fed78544` without conflicts.  `git range-diff` records the one-to-one
+  mapping: `bc797515..23ac3b1d` to `addd3638..b5daac48`.
+- The current shared NIO headers required a small post-rebase compatibility
+  commit, `0bbfa6b6`: use `TransportKind::FujiBusSlip` and pass
+  `config.translation` to `register_network_device`.  This is independent of
+  the production NetSIO D1--D8 frontend and native-endpoint scope.
+- `source "$NIO_WORKSPACE/scripts/env.sh" && cd repos/AltirraSDL &&
+  ./build.sh --debug` passed after that compatibility adjustment.  The initial
+  failure was only the above stale embedded-device API, not an upstream raw-SIO
+  regression.
+- Identical config-mode virtual run used the rebuilt binary, the existing
+  `atari-nio-config-boot.yaml`, generated `autorun.atr`, NIO NetSIO frontend,
+  and hub.  Trace logs:
+  `/tmp/atari-story13-run/nio-20261020-173248-upstream.log` and
+  `/tmp/atari-story13-run/hub-20261020-173248-upstream.log`.
+  It again reads sectors 1--3, then repeats D1 sector 361
+  (`31 52 69 01 ED`) after every dispatched 256-byte `DATA_BLOCK`; it later
+  retries sector 4.  Thus upstream refresh did not resolve the 256-byte
+  custom-device failure and does not constitute launch evidence.
+- Deterministic bridge breakpoints captured the boot-sector DCB at `$0300`:
+  `31 01 52 40 00 04 07 00 80 00 01 00` (and sectors 2/3), proving a standard
+  D1 read with `DBYT=$0080` for the Atari OS boot sectors.  At the actual
+  PicoBoot sector-361 SIOV entry (`$E459`), the DCB is
+  `31 01 52 40 00 07 07 00 80 00 69 01`: D1 READ, sector 361, and again
+  `DBYT=$0080`.  The call returns to `$0832` with `Y=$8F`, carry set, and
+  `DSTATS=$8F`, after the production frontend correctly dispatched the ATR's
+  256-byte sector.  This is the concrete guest-side failure, not a bridge
+  credit/READY or upstream scheduling regression.
+- The workspace submodule pointer remains unchanged pending a passing virtual
+  launch gate.  A named stash retains only generated AltirraBridge Python
+  bytecode caches from the earlier probe; it contains no source or settings.
