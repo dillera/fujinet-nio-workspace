@@ -1,14 +1,23 @@
-# Atari Disk SIO v1 conformance fixtures
+# Atari SIO v1 conformance fixtures
 
 This directory is the canonical, implementation-independent contract for the
-standard Atari disk surface.  It describes virtual protocol evidence only: it
-does **not** assert SIO electrical characteristics, timing, UART behaviour, or
-physical-drive compatibility.
+standard Atari disk surface and native NIO application channel. It describes
+virtual protocol evidence only: it does **not** assert SIO electrical
+characteristics, timing, UART behaviour, or physical-drive compatibility.
 
 `fixtures/disk_v1.json` is the literal disk-v1 matrix.  Its stable scenario
 IDs are the identifiers an adapter reports; it must not be regenerated from a
-production framer.  `disk_v1.manifest.json` projects those scenarios as ordered
+production framer. `disk_v1.manifest.json` projects those scenarios as ordered
 SIO phases for virtual consumers.
+
+`fixtures/nio_v1.json` is the literal native packet-NIO v1 matrix for SIO
+address `0x7f`. It fixes the client-visible `Q`/`W`/`P`/`R` command, AUX, DCB
+count, control reply, state, capacity, rejection, timeout, recovery, and reset
+vectors. It is independent of the library assembly and firmware endpoint.
+`Q` and `P` counts are client/fixture expectations; physical SIO exposes their
+AUX and serial bytes, not the Atari DCB count. The matrix uses symbolic control
+bytes (`A`, `C`, `N`, and `E`) and literal packet/state byte strings, rather
+than claiming physical timing or device implementation details.
 
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
@@ -58,9 +67,10 @@ For 256-byte media, sectors 1--3 transfer 128 bytes and later sectors transfer
 rejected. Config mode
 selects only `boot.config_uri` for D1; normal mode uses restored D1--D8 slots.
 
-Excluded: DiskDevice/FujiBus, LegacyTransport, SLIP/padded legacy traffic,
-`0x71` and `0x7f` traffic, formatting, PERCOM, high-speed SIO, non-ATR media,
-emulator integration, and physical timing/electrical claims.
+Excluded: DiskDevice/FujiBus service implementation, LegacyTransport,
+SLIP/padded legacy traffic, `0x71` traffic, formatting, PERCOM, high-speed
+SIO, non-ATR media, emulator integration, and physical timing/electrical
+claims.
 
 Run the stdlib-only validator with:
 

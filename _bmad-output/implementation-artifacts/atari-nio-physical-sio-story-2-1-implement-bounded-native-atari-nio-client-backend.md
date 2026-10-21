@@ -4,7 +4,7 @@ feature: 'atari-nio-physical-sio'
 story: '2.1'
 type: 'feature'
 created: '2026-10-21'
-status: 'in-progress'
+status: 'done'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'
@@ -36,36 +36,19 @@ only: `0x7F` is an SIO address, not a FujiBus service ID; the packet is a raw
 FujiBus packet, not SLIP; and the disk `D1:`--`D8:`/`DiskService` plane is
 untouched.
 
-## Current implementation and required change
+## Delivered implementation
 
-The actual target backend is
-`repos/fujinet-nio-lib/src/platform/atari/fn_transport.s`. It already supplies
-the standard `fn_transport_*` ABI and drives the Atari DCB/SIOV directly, but
-it currently:
+`repos/fujinet-nio-lib/src/platform/atari/fn_transport.s` is now the native
+packet client. It sends raw complete FujiBus packets through SIO device `0x7F`
+with a named 512-byte capacity, never uses SLIP or chunking, and derives every
+`W`/`R` DCB count and AUX from the exact packet length. `P` and optional `Q`
+use their fixed client receive counts and AUX zero.
 
-- wraps packets in SLIP,
-- sends and receives 128-byte `W`/`R` chunks,
-- reads until a SLIP terminator, and
-- uses the old reserved-device constant and a single fixed SIO timeout.
-
-Those are incompatible with v1. Replace its exchange implementation with one
-bounded packet-native transaction while preserving the public library ABI,
-common FujiBus packet construction/parsing, and all non-Atari target source
-selection. Do not add the Atari target to the common stream transport family.
-
-Required target-local additions are a single named 512-byte v1 payload
-capacity shared by the client-side checks/buffers, native `0x7F` command and
-DCB constants, state/deadline bookkeeping, and a public Atari-only opt-in
-notification declaration/implementation. If a public configuration surface is
-needed for polling interval or total deadline, it must be explicitly Atari
-namespaced and default to polling; it must not change existing public calls or
-the behavior of BBC, MS-DOS, Amiga, or Linux archives.
-
-The stale Atari assembly `fn_protocol.inc` duplicates error/configuration
-values that disagree with current public headers. This work must take constants
-used by the new backend from one reviewed target-local source consistent with
-the public headers; it must not broaden a cleanup of unrelated assembly
-protocol definitions.
+The target preserves the existing `fn_transport_*` ABI and common packet layer.
+The Atari-only declarations in `include/fujinet-nio.h` expose explicit
+capability discovery, baseline capacity, and the ISR-safe PROC latch; the
+library-link test references them under `__ATARI__`. No common backend or
+non-Atari source selection changed.
 
 ## Interface decisions
 
@@ -138,36 +121,37 @@ protocol definitions.
 | `repos/fujinet-nio-lib/tests/` and Makefile test registration | Add a host-side DCB/SIO seam test that consumes literal NIO fixture cases and asserts command, AUX, receive count, payload exactness, state transitions, deadline recovery, and hook behavior. | The test oracle must not import the production backend/framer. |
 | `repos/fujinet-nio-lib/docs/transport-backends.md` | Correct Atari backend documentation from SLIP/chunking to the approved packet-native contract. | Reference the canonical wire contract; do not duplicate it. |
 
-The focused tests include an actual cc65 Atari-linked probe and Altirra Bridge
-DCB capture at SIOV. The existing infrastructure has no reusable mock-SIOV
-harness, so complete end-to-end response/recovery evidence requires the later
-emulator endpoint from Story 2.2; this story must state that limitation rather
-than treating a host reimplementation as backend evidence. Build the Atari
-archive as part of `make check`; guest/emulator/physical proof remains owned
-by later stories.
+The focused runtime test is `tests/atari_transport_soft65c02.s`. It includes
+the production assembly and intercepts its SIOV call, rejecting unexpected
+calls while asserting device, command, direction, 16-bit count, AUX, packet
+data, response data, returned length, and ordering. It covers accepted timeout
+recovery, rejected `W`, interrupted `R`, 511/512/513 boundaries, canaries,
+invalid `Q`, malformed `P`, reset-to-idle, and the PROC latch. It is executed
+by `make test-atari-transport`, which is a dependency of `make check`.
 
-## Explicit dependency / blocker before implementation
+## Fixture prerequisite resolved
 
-The required independent native-NIO fixtures do **not** exist in the current
-workspace. `integration-tests/atari-sio/` currently provides only completed
-`disk_v1` fixtures and a disk boot trace; it has no `0x7F` `Q`/`W`/`P`/`R`
-fixture, manifest, or validator. The existing disk vectors expressly exclude
-`0x7F`, so they cannot be reused as an oracle.
+`integration-tests/atari-sio/fixtures/nio_v1.json` and its stdlib validator
+now provide stable, production-independent native-v1 literals: SIO command
+frames/checksums, exact DCB/AUX values, small packet checksums, the 512-byte
+pattern checksum, rejection, timeout/recovery, malformed poll, reset, and
+invalid-capability cases. The fixture describes observable wire/client facts;
+it does not implement either endpoint.
 
-Before this story is implemented, create the smallest workspace-owned,
-production-independent native fixture set: literal command/data/control/checksum
-vectors plus a stdlib validator covering the acceptance cases above, with stable
-scenario IDs. It must encode observable SIO data/AUX/state only; DCB receive
-counts for fixed `Q` and `P` are client/fixture assertions rather than claims
-about device-side wire validation. This prerequisite fixes no firmware behavior
-and does not introduce an alternative protocol. Story 2.2 consumes the same
-fixture authority for the server side.
+## Acceptance evidence
+
+| Criterion | Implementation and executed evidence |
+| --- | --- |
+| 1 | `nio_v1.json` plus `test_nio_v1_fixtures.py` validate literal frames, checksums, fixed `Q`/`P`, exact `W`/`R`, boundaries, and recovery facts. The assembled soft65c02 SIOV test verifies every DCB field and rejects unexpected calls. |
+| 2 | `fn_transport.s` uses `NIO_CAPACITY = 512`, raw caller buffers, and exact lengths. The runtime test verifies 511/512 requests, a full 512-byte non-repeating request/response pattern, canaries, and local 513 rejection. `make check` builds Atari, BBC, MS-DOS, Linux, and Amiga archives. |
+| 3 | Runtime modes prove pending timeout retain/recovery, rejected `W` direct retry, interrupted `R` recovery, unknown/zero/error `P` retention, oversized ready retention, and reset idle release before a distinct new `W`. |
+| 4 | `fn_atari_max_payload()` starts at 512; explicit `Q` verifies revision/capacity and restores baseline on failure. `fn_atari_proc_notify()` is a one-store latch; the runtime test proves it causes no SIOV call or transaction. Foreground still polls `P`. |
+| 5 | Executed: `python3 -m unittest discover -s integration-tests/atari-sio/tests -v`; `make test-atari-transport`; `make atari`; and `make check` after sourcing the workspace environment. |
 
 ## Dependencies and hand-off
 
 - Depends on the completed Epic 1 single ingress/disk frontend only as an
   architectural preservation boundary; it requires no changes there.
-- Is blocked on the narrow native fixture prerequisite above.
 - Does not depend on Story 2.2 implementation, but its client tests must use
   the approved fixture contract so Story 2.2 can independently implement the
   peer.
@@ -180,3 +164,10 @@ fixture authority for the server side.
 No changes to `repos/fujinet-nio`, `repos/nio-core-apps`, the production
 `AtariSioDiskFrontend`/`DiskService` path, firmware ingress topology, legacy
 FujiNet commands, CIO `N:`, AltirraSDL/NetSIO, or physical hardware/timing.
+
+## Remaining limitation
+
+The completed soft65c02 evidence executes the real assembled client with an
+intercepted SIOV peer; it is not a live client-to-production-firmware run.
+That integration, emulator/NetSIO behavior, and physical SIO proof remain the
+explicit scope of Stories 2.2 and 2.3.
