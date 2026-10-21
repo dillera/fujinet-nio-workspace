@@ -4,7 +4,7 @@ feature: 'atari-nio-physical-sio'
 story: '2.3'
 type: 'feature'
 created: '2026-10-21'
-status: 'draft'
+status: 'in-progress'
 baseline_workspace_commit: '2b8c4c37'
 baseline_firmware_commit: '0581bd3f'
 baseline_altirra_commit: '1456ba08'
@@ -199,6 +199,11 @@ advancing an expected transcript unconditionally.
 5. Each run retains stable-ID emulator/hub/NIO/POKEY evidence and labels its
    result virtual protocol/scheduling only.  It makes no physical-SIO claim.
 
+Accepted-W polling timeout remains Story 2.1 client evidence.  The synchronous
+production endpoint is not required to manufacture an externally observable
+post-W `P(pending)` interval, and virtual reports must contain only states the
+actual adapter observes.
+
 ## Verification
 
 The exact target names are selected during implementation, but the completed
@@ -226,21 +231,52 @@ with a stable report ID and required evidence fields.  The small reference-only
 manifest above is therefore required.  It introduces no protocol choice and
 needs no new wire fixture bytes.
 
-There is one review decision.  The completed synchronous
-`AtariSioNioFrontend` has no externally reachable *post-data* `P(pending)`
-interval: after a valid W data frame it routes synchronously and becomes ready;
-while it is receiving, SIO cannot begin a P without the ingress cancelling the
-incomplete W.  Consequently virtual acceptance can exercise real response
-retention/recovery and reset, but not the Story 2.1 client's accepted-W timeout
-followed by P/R recovery against a production endpoint.  Adding asynchronous
-dispatch merely to manufacture that interval conflicts with Story 2.2's
-approved synchronous-core boundary.  Confirm that Story 2.3 records this as
-already-covered client behavior (with fixture ID retained but not a virtual
-endpoint run), leaving live client/service timeout behavior to Story 2.4; or
-explicitly authorize an async endpoint design before implementation.
+The synchronous endpoint has no externally reachable *post-data*
+`P(pending)` interval: after a valid W data frame it routes synchronously and
+becomes ready; while it is receiving, SIO cannot begin P without the ingress
+cancelling the incomplete W.  This is accepted.  Story 2.1 remains the
+independent client proof for accepted-W polling timeout and P/R recovery;
+virtual acceptance reports only endpoint states actually observed.  Do not add
+asynchronous dispatch merely to manufacture a pending interval.
 
-Altirra's verified-command boundary is otherwise known, and the approved
-endpoint/router remains the sole Q/W/P/R transaction owner.
+## Implementation status: NetSIO ingress
+
+The first deliverable is complete in `repos/fujinet-nio`: the POSIX native
+profile is now `TransportKind::None` plus an `AtariNetSioIngress` work source.
+It owns the existing UDP/NetSIO lifecycle and feeds exact SIO command/data
+frames to `AtariSioIngressRouter`, `AtariSioDiskFrontend`, and the production
+`AtariSioNioFrontend(core.routingManager())`.  The former `$71`, W/R-only,
+SLIP stream, default 768-byte read, and padded-output behavior is absent from
+that adapter.
+
+`tests/test_atari_netsio_ingress.cpp` drives the real NetSIO parser/adapter
+with `nio_v1.json` literals and a real core route.  It proves Q/W/P/R payload
+ordering and lengths, one dispatch, `$71` exclusion, rejected W, wrong-R
+retention, and cold-reset-to-idle.  It is not a direct-frontend substitute.
+
+Executed evidence for this increment:
+
+```sh
+python3 -m unittest discover -s integration-tests/atari-sio/tests -v
+# 19 passed
+
+cd repos/fujinet-nio
+build/atari-fujibus-netsio-debug/tests/fujinet-nio-tests \
+  --test-case='Atari NetSIO ingress*' --no-skip
+# 2 cases, 88 assertions passed
+ctest --test-dir build/atari-fujibus-netsio-debug --output-on-failure
+# 3/3 passed
+ctest --test-dir build/fujibus-pty-debug --output-on-failure
+# 3/3 passed
+
+cd ../..
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --trace-serial --capture-dcb --explicit-cold-reset
+# native and production-NetSIO page-6 NIO! boot passed
+```
+
+Altirra's embedded native device, the cross-adapter projection runner, and
+Story 2.3 completion remain intentionally outstanding.
 
 ## Out of scope
 
