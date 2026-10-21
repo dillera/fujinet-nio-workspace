@@ -8,6 +8,12 @@
     {"id":"p-pending","command":"P","aux":0,"dcb_count":3,"reply":["A","C","01 00 00"],"state":"pending"},
     {"id":"p-ready","command":"P","aux":0,"dcb_count":3,"reply":["A","C","02 04 00"],"state":"ready"},
     {"id":"r-ready","command":"R","aux":4,"dcb_count":4,"payload":"fc 01 04 ff","reply":["A","C"],"state":"idle"},
-    {"id":"r-wrong-length-retains","command":"R","aux":3,"dcb_count":3,"reply":["N"],"state":"ready"}
+    {"id":"r-wrong-length-retains","command":"R","aux":3,"dcb_count":3,"reply":["N"],"state":"ready"},
+    {"id":"w-rejected-busy","command":"W","aux":4,"dcb_count":4,"reply":["N"],"state":"ready"},
+    {"id":"r-interrupted-consumes","command":"R","aux":4,"dcb_count":4,"reply":["A","C","interrupt"],"state":"idle"},
+    {"id":"timeout-retains","command":"P","aux":0,"dcb_count":3,"reply":["A","C","01 00 00"],"state":"pending"},
+    {"id":"reset-clears","command":"P","aux":0,"dcb_count":3,"reply":["A","C","00 00 00"],"state":"idle"},
+    {"id":"q-invalid-revision","command":"Q","aux":0,"dcb_count":4,"reply":["A","C","02 00 02 00"],"state":"idle"},
+    {"id":"q-invalid-capacity","command":"Q","aux":0,"dcb_count":4,"reply":["A","C","01 ff 01 00"],"state":"idle"}
   ]
 }

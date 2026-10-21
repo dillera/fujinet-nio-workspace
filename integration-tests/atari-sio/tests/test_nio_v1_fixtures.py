@@ -13,6 +13,12 @@ class NioV1FixtureTest(unittest.TestCase):
         self.assertEqual(scenarios["p-ready"]["reply"][-1], "02 04 00")
         self.assertEqual(scenarios["r-wrong-length-retains"]["reply"], ["N"])
         self.assertEqual(scenarios["r-wrong-length-retains"]["state"], "ready")
+        self.assertEqual(scenarios["w-rejected-busy"]["reply"], ["N"])
+        self.assertEqual(scenarios["r-interrupted-consumes"]["state"], "idle")
+        self.assertEqual(scenarios["timeout-retains"]["state"], "pending")
+        self.assertEqual(scenarios["reset-clears"]["state"], "idle")
+        self.assertTrue(scenarios["q-invalid-revision"]["reply"][-1].startswith("02"))
+        self.assertEqual(scenarios["q-invalid-capacity"]["reply"][-1], "01 ff 01 00")
         self.assertEqual(scenarios["w-idle"]["payload"], scenarios["r-ready"]["payload"])
         for s in DATA["scenarios"]:
             self.assertIn(s["command"], "QWPR")
