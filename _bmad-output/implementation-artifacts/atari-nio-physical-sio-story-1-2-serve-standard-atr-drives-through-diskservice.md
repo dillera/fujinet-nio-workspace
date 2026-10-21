@@ -2,7 +2,7 @@
 title: 'Serve standard Atari ATR drives through DiskService'
 type: 'feature'
 created: '2026-10-20'
-status: 'implemented'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: 'f234f30147ed1a6a2550203dd28afbf68be21491'
 context:

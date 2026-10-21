@@ -119,6 +119,11 @@ Operators can build, flash, configure, diagnose, and prove the official FujiNet 
 
 Atari users can boot the selected configuration ATR as `D1:` and use configured URI-backed ATR media through standard `D1:`–`D8:` SIO behavior.
 
+**Status:** done (2026-10-21). Story 1.1 fixtures, Story 1.2's single-ingress
+DiskService frontend, and Story 1.3's cold-start policy and deterministic
+virtual boot gate are complete. This is virtual boot/protocol evidence only;
+physical electrical and timing acceptance remains Epic 3.
+
 ### Story 1.1: Freeze Atari ATR disk conformance fixtures
 
 As a maintainer,

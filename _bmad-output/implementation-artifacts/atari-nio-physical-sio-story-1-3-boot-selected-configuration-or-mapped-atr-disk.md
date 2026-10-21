@@ -2,7 +2,8 @@
 title: 'Boot the selected configuration or mapped ATR disk'
 type: 'feature'
 created: '2026-10-20'
-status: 'in-progress'
+status: 'done'
+completed: '2026-10-21'
 baseline_commit: '6756149d4f56743dbb9a98fce43dfd63ef79ec59'
 context:
   - 'docs/agent-test-policy.md'
@@ -235,12 +236,11 @@ compile/link result as physical acceptance.
 
 ## Dependencies and blockers
 
-Depends on completed Stories 1.1 and 1.2.  It does not depend on Story 2.2 or
-2.4 for disk boot; it must specifically avoid their native endpoint and guest
-acceptance scope.  The current virtual sidecar is a genuine implementation gap
-because it is legacy-channel based; the scoped D1--D8 portable-frontend adapter
-and trace capture above are required before the story can claim a virtual Atari
-boot.  There are no remaining policy blockers.
+Depends on completed Stories 1.1 and 1.2. It does not depend on Story 2.2 or
+2.4 for disk boot; it specifically avoids their native endpoint and guest
+acceptance scope. The completed virtual lane uses the production D1--D8
+portable frontend and shared `DiskService`; there are no remaining Story 1.3
+policy or implementation blockers.
 
 ## Implementation evidence
 
@@ -307,10 +307,10 @@ boot.  There are no remaining policy blockers.
 
 The prior `$5060` breakpoint was subsequently shown to be insufficient: XL
 Self Test can execute that address before FAPP is loaded. It is retained as
-investigation history only, not launch acceptance. Story 1.3 remains in
-progress until the executable virtual test observes the FAPP bytes at `$5060`,
-actual D1 traffic through the production frontend, and continued application
-execution.
+investigation history only, not launch acceptance. The former FAPP/`$5060`
+criterion was superseded by the dedicated page-6 acceptance XEX and its
+signature-plus-loop gate recorded below; that executable test observes actual
+D1 traffic through the production frontend and continued program execution.
 
 ### Prior verification record — 2026-10-20
 
@@ -349,10 +349,32 @@ execution.
   config and D2--D8 preservation, are covered by the focused bootstrap tests.
 - [x] Source-built DD PicoBoot is reproducible from the pinned MyPicoDOS commit
   and produces byte-identical installed boot assets.
-- [ ] Native Altirra control and production `AtariSioDiskFrontend`/shared
-  `DiskService`/NetSIO boot runs must demonstrate FAPP-specific execution,
-  rather than an address-only breakpoint.
+- [x] Native Altirra control and production `AtariSioDiskFrontend`/shared
+  `DiskService`/NetSIO boot runs demonstrate actual execution of the dedicated
+  page-6 acceptance XEX: `NIO!` at `$06F0` and stable loop PCs `$0624`--`$0627`.
 - [x] Story 1.1 goldens, host regressions, and the clean classic ESP32 build
   passed.
 - [x] Evidence is explicitly virtual only; real SIO electrical/timing and
   real-Atari acceptance remain Epic 3 work.
+
+### Final deterministic virtual boot acceptance — 2026-10-21
+
+- The primary acceptance payload is
+  `integration-tests/atari-sio/boot-app/boot_acceptance.s`, not FAPP. It is a
+  startup-free page-6 XEX that changes the display colours, writes `NIO!` to
+  `$06F0`--`$06F3`, and loops at `$0624`. Its separate double-density ATR is
+  produced by the pinned source-built PicoBoot and existing `dir2atr` pipeline;
+  it does not replace the production configuration `autorun.atr` or Story 1.1
+  goldens.
+- `./scripts/build.sh atari-boot-acceptance` rebuilds AltirraSDL, the POSIX
+  Atari NetSIO firmware preset, and the test ATR, then runs native and
+  production NetSIO cold boots. The committed compact contract is
+  `integration-tests/atari-sio/fixtures/boot_acceptance_trace.json`; timestamped
+  screenshots, sidecar logs, and inspection data are retained under ignored
+  `test-evidence/atari-sio-boot-*` directories.
+- The passing run proves native and production launch signatures and loop PCs,
+  plus the production trace's D1 STATUS, 128-byte boot READs for sectors 1--3,
+  and a 256-byte double-density READ of sector 361. The first sector-1 reply
+  validates `A,C`, the 128-byte payload, and checksum `$94`. This is an
+  executable virtual boot/launch regression; it makes no real-Atari or
+  electrical/timing claim.
