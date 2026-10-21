@@ -86,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
                 build.qemu_monitor(targets)
             elif target == "atari-run":
                 build.atari_run(targets)
+            elif target == "atari-boot-acceptance":
+                build.atari_boot_acceptance(targets)
             elif target == "bbc-pty":
                 build.run_bbc_pty_for_machine("bbc")
             elif target == "master-pty":

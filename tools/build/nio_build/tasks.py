@@ -64,6 +64,12 @@ class Build:
     def atari_run_help(self) -> str:
         return self.external_help([self.ctx.root / "scripts" / "atari-run"])
 
+    def atari_boot_acceptance_help(self) -> str:
+        return self.external_help([
+            "python3",
+            self.ctx.root / "integration-tests" / "atari-sio" / "run_boot_acceptance.py",
+        ])
+
     def run_make(self, name: str, repo: str, *args: str, env: dict[str, str] | None = None) -> None:
         path = self.p(repo)
         self.runner.require_dir(path)
@@ -1023,6 +1029,26 @@ class Build:
             self.fujinet_atari_netsio()
         self.runner.run("atari-run", [self.ctx.root / "scripts" / "atari-run", *args])
 
+    def atari_boot_acceptance(self, args: list[str]) -> None:
+        """Build and execute the isolated Atari Story 1.3 virtual boot gate."""
+        if args[:1] == ["--"]:
+            args = args[1:]
+        self.altirra()
+        self.fujinet_atari_netsio()
+        boot_app = self.ctx.root / "integration-tests" / "atari-sio" / "boot-app"
+        bridge = self.ctx.root / "repos" / "fujinet-emulator-bridge" / "fujinet-bridge"
+        self.runner.require_dir(bridge)
+        if not (bridge / "netsiohub" / "__main__.py").is_file():
+            raise SystemExit(
+                f"Missing NetSIO hub module: {bridge / 'netsiohub' / '__main__.py'}\n"
+                "Initialize repos/fujinet-emulator-bridge first."
+            )
+        self.runner.run("atari-boot-acceptance-image", ["make"], cwd=boot_app)
+        self.runner.run(
+            "atari-boot-acceptance",
+            ["python3", self.ctx.root / "integration-tests" / "atari-sio" / "run_boot_acceptance.py", *args],
+        )
+
     def atari_stop(self) -> None:
         patterns = [
             f"python3 -m netsiohub --port {self.ctx.env.get('ATARI_NETSIO_ATDEV_PORT', '9996')} --netsio-port {self.ctx.env.get('ATARI_NETSIO_PORT', '9997')}",
@@ -1174,6 +1200,7 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("qemu-monitor", "Send a command/key to active qemu-run monitor socket", lambda b: b.qemu_monitor([]), consumes_args=True, help_text=lambda b: b.qemu_monitor_help()),
         t("msdos-dev-curses", "Build and run MS-DOS NIO app image in QEMU curses mode", Build.msdos_dev_curses, consumes_args=True),
         t("atari-run", "Run an Atari app under the configured emulator", lambda b: b.atari_run([]), consumes_args=True, help_text=lambda b: b.atari_run_help()),
+        t("atari-boot-acceptance", "Run the deterministic Altirra/NetSIO Atari boot acceptance", lambda b: b.atari_boot_acceptance([]), consumes_args=True, help_text=lambda b: b.atari_boot_acceptance_help()),
         t("atari-stop", "Stop stale Atari emulator sidecars", Build.atari_stop, consumes_args=True),
         t("amiga-run", "Run the selected Amiga test app in Amiberry", lambda b: b.amiga_run([], build_adf=False), consumes_args=True, help_text=lambda b: b.amiga_run_help(build_adf=False)),
         t("amiga-e2e", "Build and run the selected Amiga test app in Amiberry against FujiNet NIO", lambda b: b.amiga_run([], build_adf=True), consumes_args=True, help_text=lambda b: b.amiga_run_help(build_adf=True)),
