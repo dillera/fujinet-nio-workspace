@@ -39,6 +39,24 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --write-projection-results
 ```
 
+The focused `native-core-dispatch` NetSIO execution uses the same Altirra,
+hub, bridge, reset, and evidence lifecycle. Its small Atari XEX invokes real
+SIOV Q/W/P/R calls; its process-side route is a real `FujinetCore` device only
+so the independently literal FujiBus request has a deterministic response.
+It does not emulate an SIO peer or call the frontend directly. The runner
+compares captured production UDP traffic, including every command/control/data
+checksum, against `nio_v1.json`, records the stable scenario result, and proves
+a deliberately corrupted observed checksum is rejected.
+
+```sh
+source "$NIO_WORKSPACE/scripts/env.sh"
+cmake --build repos/fujinet-nio/build/atari-fujibus-netsio-debug \
+  --target fujinet-nio-atari-netsio-projection
+make -C integration-tests/atari-sio/native-projection-app all
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-core-dispatch --timeout 20
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

@@ -55,6 +55,45 @@ class VirtualProjectionTests(unittest.TestCase):
         with self.assertRaises(projection.ProjectionMismatch):
             projection.compare_observed_responses(entry, wrong_response)
 
+    def test_netsio_core_dispatch_capture_compares_every_native_byte_and_rejects_corruption(self):
+        # This is a parser regression only.  The executable projection feeds
+        # its real production UDP capture to the same comparison function.
+        log = "\n".join((
+            "core-dispatch fixture route invocation 1",
+            "udp: Received 7 bytes: 02 7F 51 00 00 D0 01",
+            "udp: Sending 6 bytes: 81 01 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Sending 5 bytes: 02 01 00 02 00",
+            "udp: Sending 2 bytes: 01 03",
+            "udp: Received 7 bytes: 02 7F 57 06 00 DC 02",
+            "udp: Sending 6 bytes: 81 02 01 41 07 00",
+            "udp: Received 8 bytes: 02 01 02 06 00 09 00 03",
+            "udp: Received 4 bytes: 09 12 04 12",
+            "udp: Sending 6 bytes: 81 04 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Received 7 bytes: 02 7F 50 00 00 CF 05",
+            "udp: Sending 6 bytes: 81 05 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Sending 4 bytes: 02 02 09 00",
+            "udp: Sending 2 bytes: 01 0B",
+            "udp: Received 7 bytes: 02 7F 52 09 00 DA 06",
+            "udp: Sending 6 bytes: 81 06 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Sending 10 bytes: 02 01 02 09 00 0D 01 00 AA 55",
+            "udp: Sending 2 bytes: 01 1A",
+            "udp: Received 7 bytes: 02 7F 50 00 00 CF 07",
+            "udp: Sending 6 bytes: 81 07 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Sending 4 bytes: 02 00 00 00",
+            "udp: Sending 2 bytes: 01 00",
+        ))
+        observed = projection.compare_netsio_native_core_dispatch(log, self.manifest)
+        self.assertEqual([item["fixture"] for item in observed],
+                         ["q-idle", "w-core-dispatch", "p-core-dispatch-ready",
+                          "r-core-dispatch", "reset-clears"])
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_netsio_native_core_dispatch(log.replace("01 1A", "01 1B"), self.manifest)
+
     def test_result_is_adapter_scoped_and_missing_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)

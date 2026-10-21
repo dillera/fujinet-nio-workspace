@@ -353,6 +353,58 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
 Full native operation playback through each virtual adapter remains the next
 Story 2.3 increment; Story 2.3 is not complete.
 
+## Implementation status: NetSIO native-core-dispatch projection
+
+The first executable native projection now uses the existing boot runner's
+Altirra, NetSIO hub, bridge, reset, screenshot, and log lifecycle.  Its small
+cc65 XEX makes real Atari OS SIOV calls for Q, literal `w-core-dispatch`, P,
+R, and terminal P.  It verifies the returned Q capability, ready length,
+literal nine-byte FujiBus response, and post-R idle bytes in Atari RAM.
+
+`fujinet-nio-atari-netsio-projection` is a test-only process route, not an
+SIO peer: it constructs a real `FujinetCore`, production `AtariNetSioIngress`,
+`AtariSioNioFrontend`, and `RoutingManager`, with a bounded deterministic
+`VirtualDevice` only behind the literal raw FujiBus request.  The adapter is
+therefore the production UDP NetSIO/SIO endpoint and the guest communicates
+through Altirra and the hub.  The route logs and rejects a second dispatch.
+
+`compare_netsio_native_core_dispatch()` reads the production UDP capture and
+requires exactly Q, W, P, R, P in order; every literal command frame, W data
+frame and checksum, ACK/COMPLETE controls, response payload, and SIO checksum
+is compared to `nio_v1.json` and the `native-core-dispatch` manifest group.
+It refuses a pass without one real-core dispatch, the guest `NVP!` result, or
+all required evidence.  The executable run deliberately mutates the observed
+terminal-R checksum before comparison and records that the mutation is
+rejected; the unmodified capture then writes adapter=`netsio`,
+scenario_id=`native-core-dispatch`, status=`pass`.
+
+Executed evidence for this increment:
+
+```sh
+source "$NIO_WORKSPACE/scripts/env.sh"
+cmake --build repos/fujinet-nio/build/atari-fujibus-netsio-debug \
+  --target fujinet-nio-atari-netsio-projection -j2
+make -C integration-tests/atari-sio/native-projection-app all
+python3 -m unittest discover -s integration-tests/atari-sio/tests -v
+# 25 passed; includes deliberate captured-checksum corruption rejection
+
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-core-dispatch --timeout 20
+# guest=NVP!, adapter=netsio, scenario_id=native-core-dispatch, status=pass
+
+ctest --test-dir repos/fujinet-nio/build/atari-fujibus-netsio-debug \
+  --output-on-failure
+# 3/3 passed
+
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --trace-serial --capture-dcb --explicit-cold-reset \
+  --write-projection-results
+# existing page-6 native + production-NetSIO boot passed
+```
+
+The remaining virtual scenario families and all embedded-Altirra projection
+playback remain deliberately outstanding; this does not mark Story 2.3 done.
+
 ## Out of scope
 
 Public `fn_*` Clock/File/Network/Disk guest-XEX acceptance, CIO `N:`/BASIC
