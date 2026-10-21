@@ -579,10 +579,28 @@ def write_netsio_native_core_dispatch_projection(run_result):
         negative_verified = True
     else:
         raise RuntimeError("corrupted native-core-dispatch capture unexpectedly passed comparison")
+    # The terminal R payload must follow COMPLETE.  Mutate only the captured
+    # NetSIO datagrams to prove ordering, not merely literal checksum values,
+    # participates in the production-evidence verdict.
+    reordered, changed = re.subn(
+        r"(?P<ack>^[^\n]*udp: Sending 6 bytes: 81 [0-9A-F]{2} 01 41 00 00\n)"
+        r"(?P<complete>^[^\n]*udp: Sending 2 bytes: 01 43\n)"
+        r"(?P<payload>^[^\n]*udp: Sending 10 bytes: 02 01 02 09 00 0D 01 00 AA 55\n)"
+        r"(?P<checksum>^[^\n]*udp: Sending 2 bytes: 01 1A)",
+        r"\g<ack>\g<payload>\g<complete>\g<checksum>", trace, count=1, flags=re.MULTILINE)
+    if changed != 1:
+        raise RuntimeError("could not create deliberate native-core-dispatch response-order mutation")
+    try:
+        compare_netsio_native_core_dispatch(reordered, manifest)
+    except ProjectionMismatch:
+        order_negative_verified = True
+    else:
+        raise RuntimeError("reordered native-core-dispatch capture unexpectedly passed comparison")
     result = scenario_result("netsio", "native-core-dispatch", observed,
                              evidence_paths_for_boot(run, "netsio"),
                              passed=run_result["guest_result"] == "NVP!")
     result["negative_checksum_mutation_rejected"] = negative_verified
+    result["negative_response_order_mutation_rejected"] = order_negative_verified
     path = write_scenario_result(run / "virtual-projection-results", result)
     result["result_path"] = str(path)
     return result

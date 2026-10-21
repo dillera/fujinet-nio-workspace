@@ -164,6 +164,65 @@ def _nio_datagrams(log):
     return events
 
 
+def _fixture_reply(fixture, command):
+    """Split an independent fixture reply into native control/data fields."""
+    controls = []
+    reply_payload = None
+    for part in fixture["reply"]:
+        if len(part) == 1:
+            controls.append(ord(part))
+        elif reply_payload is None:
+            reply_payload = _hex(part)
+        else:
+            raise ProjectionError(f"{fixture['id']}: fixture has more than one response payload")
+    # R keeps its literal packet bytes in the fixture request/response pair,
+    # while Q and P carry their bytes directly in reply.
+    payload = reply_payload if reply_payload is not None else (
+        _hex(fixture.get("payload", "")) if command == "R" else b"")
+    checksum = (int(fixture["payload_checksum"], 16)
+                if payload and "payload_checksum" in fixture else
+                sio_checksum(payload) if payload else None)
+    return controls, payload, checksum
+
+
+def _native_response_datagrams(window):
+    """Keep only NetSIO packets that encode native SIO response bytes.
+
+    Credit and lifecycle packets deliberately remain out of this view.  Every
+    SIO control, payload, or checksum packet must instead appear here exactly
+    once and in order.
+    """
+    return [data for direction, data in window
+            if direction == "sending" and data and data[0] in (0x81, 0x01, 0x02)]
+
+
+def _assert_response_packets(identifier, packets, expected):
+    """Compare the complete captured response packet sequence, byte by byte."""
+    if len(packets) != len(expected):
+        raise ProjectionMismatch(
+            f"{identifier}: expected {len(expected)} native response packets, found {len(packets)}")
+    for ordinal, (actual, (kind, value, aux)) in enumerate(zip(packets, expected)):
+        if kind == "sync":
+            if (len(actual) != 6 or actual[0] != 0x81 or actual[2] != 0x01 or
+                    actual[3] != value or actual[4:6] != aux.to_bytes(2, "little")):
+                raise ProjectionMismatch(
+                    f"{identifier}: response packet {ordinal} is not exact {chr(value)} sync control")
+        elif kind == "byte":
+            if actual != bytes((0x01, value)):
+                raise ProjectionMismatch(
+                    f"{identifier}: response packet {ordinal} is not exact {chr(value)} control")
+        elif kind == "payload":
+            if actual != bytes((0x02,)) + value:
+                raise ProjectionMismatch(
+                    f"{identifier}: response packet {ordinal} payload differs from literal fixture")
+        elif kind == "checksum":
+            if actual != bytes((0x01, value)):
+                raise ProjectionMismatch(
+                    f"{identifier}: response packet {ordinal} checksum differs from literal fixture")
+        else:  # pragma: no cover - local construction below is exhaustive.
+            raise ProjectionError(f"{identifier}: unknown response packet kind {kind!r}")
+
+
 def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
     """Byte-verify the real NetSIO trace for the approved guest sequence.
 
@@ -198,63 +257,54 @@ def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
         window = events[position + 1:end]
         entry = {"fixture": identifier, "command": command_datagram[1:6].hex(' ')}
 
+        command = fixture["command"]
+        controls, response_payload, response_checksum = _fixture_reply(fixture, command)
         if identifier == "w-core-dispatch":
-            write_ack = next((data for direction, data in window
-                              if direction == "sending" and len(data) == 6 and data[0] == 0x81), None)
-            if write_ack is None or write_ack[3] != ord("A") or write_ack[4:6] != b"\x07\x00":
-                raise ProjectionMismatch("w-core-dispatch: missing exact accepted-W ACK/write count")
+            if controls != [ord("A"), ord("C")] or response_payload or response_checksum is not None:
+                raise ProjectionError("w-core-dispatch literal fixture no longer describes accepted W")
             payload = _hex(fixture["payload"])
-            data_frame = next((data for direction, data in window
-                               if direction == "received" and len(data) == len(payload) + 2 and data[0] == 0x02), None)
-            checksum_frame = next((data for direction, data in window
-                                   if direction == "received" and len(data) == 4 and data[0] == 0x09), None)
-            if data_frame is None or data_frame[1:-1] != payload:
-                raise ProjectionMismatch("w-core-dispatch: payload differs from literal fixture")
             expected_checksum = int(fixture["payload_checksum"], 16)
-            if checksum_frame is None or checksum_frame[1] != expected_checksum:
+            incoming = [data for direction, data in window
+                        if direction == "received" and data and data[0] in (0x02, 0x09)]
+            if len(incoming) != 2:
+                raise ProjectionMismatch("w-core-dispatch: expected exactly one payload and one checksum datagram")
+            data_frame, checksum_frame = incoming
+            if len(data_frame) != len(payload) + 2 or data_frame[1:-1] != payload:
+                raise ProjectionMismatch("w-core-dispatch: payload differs from literal fixture")
+            if len(checksum_frame) != 4 or checksum_frame[:2] != bytes((0x09, expected_checksum)):
                 raise ProjectionMismatch("w-core-dispatch: payload checksum differs from literal fixture")
-            completion = [(data[3],) if len(data) == 6 and data[0] == 0x81 else (data[1],)
-                          for direction, data in window if direction == "sending" and
-                          ((len(data) == 6 and data[0] == 0x81) or (len(data) == 2 and data[0] == 0x01))]
-            if completion[-2:] != [(ord("A"),), (ord("C"),)]:
-                raise ProjectionMismatch("w-core-dispatch: missing terminal A/C after data checksum")
-            entry.update({"data": payload.hex(' '), "checksum": f"{expected_checksum:02x}",
-                          "response": ["A", "C"]})
+            response_packets = _native_response_datagrams(window)
+            _assert_response_packets(identifier, response_packets, [
+                # NetSIO's receive grant includes the SIO checksum byte; the
+                # literal W AUX remains the packet-data length.
+                ("sync", ord("A"), fixture["aux"] + 1),
+                ("sync", ord("A"), 0),
+                ("byte", ord("C"), 0),
+            ])
+            entry.update({"data": data_frame[1:-1].hex(' '), "checksum": f"{checksum_frame[1]:02x}",
+                          "response": {"controls": [chr(response_packets[1][3]),
+                                                    chr(response_packets[2][1])],
+                                       "payload": "", "checksum": None}})
         else:
-            controls = []
-            payload = b""
-            checksum = None
-            for direction, data in window:
-                if direction != "sending":
-                    continue
-                if len(data) == 6 and data[0] == 0x81:
-                    controls.append(chr(data[3]))
-                elif len(data) == 2 and data[0] == 0x01:
-                    controls.append(chr(data[1]))
-                    checksum = data[1]
-                elif len(data) >= 2 and data[0] == 0x02:
-                    payload = data[1:]
-            expected_reply = fixture["reply"]
-            expected_controls = [part for part in expected_reply if len(part) == 1]
-            expected_payload = _hex(next((part for part in expected_reply if len(part) > 1),
-                                         fixture.get("payload", "")))
-            if controls[:len(expected_controls)] != expected_controls:
-                raise ProjectionMismatch(f"{identifier}: expected controls {expected_controls}, observed {controls}")
-            if payload != expected_payload:
-                raise ProjectionMismatch(
-                    f"{identifier}: expected payload {expected_payload.hex(' ')}, observed {payload.hex(' ')}")
-            expected_checksum = (int(fixture["payload_checksum"], 16)
-                                 if "payload_checksum" in fixture else sio_checksum(expected_payload))
-            if checksum != expected_checksum:
-                raise ProjectionMismatch(f"{identifier}: response checksum differs from canonical SIO checksum")
-            entry.update({"response": expected_controls, "payload": payload.hex(' '),
-                          "checksum": None if checksum is None else f"{checksum:02x}"})
+            if controls != [ord("A"), ord("C")]:
+                raise ProjectionError(f"{identifier}: native-core-dispatch fixture must use A/C control replies")
+            expected = [("sync", controls[0], 0), ("byte", controls[1], 0)]
+            if response_payload:
+                expected.extend([("payload", response_payload, 0),
+                                 ("checksum", response_checksum, 0)])
+            response_packets = _native_response_datagrams(window)
+            _assert_response_packets(identifier, response_packets, expected)
+            actual_payload = response_packets[2][1:] if response_payload else b""
+            actual_checksum = response_packets[3][1] if response_payload else None
+            entry.update({"response": {"controls": [chr(response_packets[0][3]),
+                                                   chr(response_packets[1][1])],
+                                        "payload": actual_payload.hex(' '),
+                                        "checksum": (None if actual_checksum is None
+                                                     else f"{actual_checksum:02x}")}})
         observed.append(entry)
 
     core = next(item for item in manifest["projections"] if item["id"] == "native-core-dispatch")
     compare_observed_operations(core, [entry["fixture"] for entry in observed[1:4]])
-    compare_observed_responses(core, [(entry["fixture"], fixtures[entry["fixture"]]["reply"])
-                                      for entry in observed[1:4]])
     return observed
 
 
