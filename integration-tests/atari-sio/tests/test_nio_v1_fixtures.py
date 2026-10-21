@@ -106,16 +106,16 @@ class NioV1FixtureTest(unittest.TestCase):
     def test_core_dispatch_pair_is_literal_raw_fujibus(self):
         scenarios = {s["id"]: s for s in DATA["scenarios"]}
         pairs = {p["id"]: p for p in DATA["packet_pairs"]}
-        self.assertEqual(set(pairs), {"core-dispatch"})
-        pair = pairs["core-dispatch"]
-        request = scenarios[pair["request_scenario"]]
-        response = scenarios[pair["response_scenario"]]
-        self.assertEqual((request["command"], response["command"]), ("W", "R"))
-        self.assertEqual(request["aux"], len(bytes.fromhex(request["payload"])))
-        self.assertEqual(response["aux"], len(bytes.fromhex(response["payload"])))
-        self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(request["payload"])))
-        self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(response["payload"])))
-        self.assertEqual(sio_checksum(bytes.fromhex(request["payload"])),
-                         int(request["payload_checksum"], 16))
-        self.assertEqual(sio_checksum(bytes.fromhex(response["payload"])),
-                         int(response["payload_checksum"], 16))
+        self.assertEqual(set(pairs), {"core-dispatch", "core-dispatch-after-reset"})
+        for pair in pairs.values():
+            request = scenarios[pair["request_scenario"]]
+            response = scenarios[pair["response_scenario"]]
+            self.assertEqual((request["command"], response["command"]), ("W", "R"))
+            self.assertEqual(request["aux"], len(bytes.fromhex(request["payload"])))
+            self.assertEqual(response["aux"], len(bytes.fromhex(response["payload"])))
+            self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(request["payload"])))
+            self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(response["payload"])))
+            self.assertEqual(sio_checksum(bytes.fromhex(request["payload"])),
+                             int(request["payload_checksum"], 16))
+            self.assertEqual(sio_checksum(bytes.fromhex(response["payload"])),
+                             int(response["payload_checksum"], 16))

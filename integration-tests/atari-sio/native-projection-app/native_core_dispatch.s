@@ -30,6 +30,11 @@ REQUEST = $0860
 COUNT   = $0870
 STATUS  = $0880
 P_RETAIN = $0890
+RESET_GO = $089f
+REQUEST_AFTER = $08a0
+P_AFTER_READY = $08b0
+R_AFTER = $08c0
+P_AFTER_IDLE = $08d0
 
 .code
 _main:
@@ -111,6 +116,148 @@ _main:
         inx
         cpx #3
         bne @pready
+
+ .ifdef RESET_TO_IDLE
+        ; The host injects a real NetSIO COLD_RESET only after this literal
+        ; response is queued.  Waiting here keeps the Atari CPU alive: it is
+        ; not an emulator reset and does not manufacture frontend state.
+        lda #4
+        sta STEP
+@await_reset:
+        lda RESET_GO
+        beq @await_reset
+
+        ; The reset discarded the accepted W response.  A poll must report
+        ; canonical IDLE; never issue an R for the stale nine-byte reply.
+        lda #5
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_IDLE
+        ldy #>P_IDLE
+        lda #'P'
+        jsr call_sio
+        sta STATUS+3
+        cmp #1
+        beq @postreset_idle_sio_ok
+        jmp fail
+@postreset_idle_sio_ok:
+        ldx #0
+@postreset_idle:
+        lda P_IDLE,x
+        cmp p_idle_expected,x
+        beq @postreset_idle_byte_ok
+        jmp fail
+@postreset_idle_byte_ok:
+        inx
+        cpx #3
+        bne @postreset_idle
+
+        ; A distinct, parseable FujiBus request must start directly with W
+        ; after IDLE.  Its reply is independently literal in nio_v1.json.
+        ldx #5
+@request_after:
+        lda request_after_expected,x
+        sta REQUEST_AFTER,x
+        dex
+        bpl @request_after
+        lda #6
+        sta STEP
+        lda #6
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<REQUEST_AFTER
+        ldy #>REQUEST_AFTER
+        lda #'W'
+        jsr call_sio
+        sta STATUS+4
+        cmp #1
+        beq @postreset_w_sio_ok
+        jmp fail
+@postreset_w_sio_ok:
+
+        lda #7
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_AFTER_READY
+        ldy #>P_AFTER_READY
+        lda #'P'
+        jsr call_sio
+        sta STATUS+5
+        cmp #1
+        beq @postreset_ready_sio_ok
+        jmp fail
+@postreset_ready_sio_ok:
+        ldx #0
+@postreset_ready:
+        lda P_AFTER_READY,x
+        cmp p_ready_expected,x
+        beq @postreset_ready_byte_ok
+        jmp fail
+@postreset_ready_byte_ok:
+        inx
+        cpx #3
+        bne @postreset_ready
+
+        lda #8
+        sta STEP
+        lda #9
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<R_AFTER
+        ldy #>R_AFTER
+        lda #'R'
+        jsr call_sio
+        sta STATUS+6
+        cmp #1
+        beq @postreset_r_sio_ok
+        jmp fail
+@postreset_r_sio_ok:
+        ldx #0
+@postreset_r:
+        lda R_AFTER,x
+        cmp r_after_expected,x
+        beq @postreset_r_byte_ok
+        jmp fail
+@postreset_r_byte_ok:
+        inx
+        cpx #9
+        bne @postreset_r
+
+        lda #9
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_AFTER_IDLE
+        ldy #>P_AFTER_IDLE
+        lda #'P'
+        jsr call_sio
+        sta STATUS+7
+        cmp #1
+        beq @postreset_terminal_idle_sio_ok
+        jmp fail
+@postreset_terminal_idle_sio_ok:
+        ldx #0
+@postreset_terminal_idle:
+        lda P_AFTER_IDLE,x
+        cmp p_idle_expected,x
+        beq @postreset_terminal_idle_byte_ok
+        jmp fail
+@postreset_terminal_idle_byte_ok:
+        inx
+        cpx #3
+        bne @postreset_terminal_idle
+        jmp success
+ .endif
 
  .ifdef WRONG_R_RETENTION
         ; A wrong R AUX must NAK.  Its unsuccessful SIOV result must leave
@@ -218,6 +365,7 @@ _main:
         cpx #3
         bne @pidle
 
+success:
         lda #'N'
         sta RESULT
         lda #'V'
@@ -283,5 +431,7 @@ call_sio:
 q_expected:       .byte 1, 0, 2, 0
 p_ready_expected: .byte 2, 9, 0
 r_expected:       .byte 1, 2, 9, 0, $0D, 1, 0, $AA, $55
+r_after_expected: .byte 1, 3, 9, 0, $0E, 1, 0, $33, $CC
 p_idle_expected:  .byte 0, 0, 0
 request_expected: .byte 1, 2, 6, 0, 9, 0
+request_after_expected: .byte 1, 3, 6, 0, $0A, 0

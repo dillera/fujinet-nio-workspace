@@ -142,6 +142,9 @@ def native_projection_fixture_ids(projection_id, manifest=None):
         "native-wrong-r-retention": ["w-core-dispatch", "p-core-dispatch-ready",
                                       "r-wrong-length-retains", "p-core-dispatch-ready",
                                       "r-core-dispatch"],
+        "native-reset-to-idle": ["w-core-dispatch", "p-core-dispatch-ready",
+                                  "reset-clears", "w-core-dispatch-after-reset",
+                                  "p-core-dispatch-ready", "r-core-dispatch-after-reset"],
     }
     if projection_id not in approved or ids != approved[projection_id]:
         raise ProjectionError(f"{projection_id}: projection no longer names the approved literal sequence")
@@ -239,9 +242,13 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
     """
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
-    if log.count("core-dispatch fixture route invocation 1") != 1 or \
-       "core-dispatch fixture route invocation 2" in log:
-        raise ProjectionMismatch(f"{projection_id}: did not route exactly once through the real core fixture")
+    dispatches = 2 if projection_id == "native-reset-to-idle" else 1
+    observed_dispatches = [int(value) for value in re.findall(
+        r"core-dispatch fixture route invocation (\d+)", log)]
+    if observed_dispatches != list(range(1, dispatches + 1)):
+        raise ProjectionMismatch(
+            f"{projection_id}: expected exactly {dispatches} real-core dispatches, "
+            f"observed {observed_dispatches}")
     fixtures = {item["id"]: item for item in fixture_data["scenarios"]}
     ids = native_projection_fixture_ids(projection_id, manifest)
     events = _nio_datagrams(log)
@@ -277,6 +284,21 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
     if position_index != len(command_positions):
         raise ProjectionMismatch(f"unexpected extra native command frames: found {len(command_positions)}")
 
+    if projection_id == "native-reset-to-idle":
+        # The runner injects the supported one-byte NetSIO COLD_RESET.  It is
+        # distinct from Altirra's normal two-byte launch reset and must land
+        # after the first READY poll but before the IDLE poll that proves the
+        # frontend discarded the queued response.
+        reset_positions = [index for index, (direction, data) in enumerate(events)
+                           if direction == "received" and data == b"\xff"]
+        if len(reset_positions) != 1:
+            raise ProjectionMismatch("native-reset-to-idle: missing or duplicated injected NetSIO reset")
+        if not (command_positions[2] < reset_positions[0] < command_positions[3]):
+            raise ProjectionMismatch("native-reset-to-idle: reset is not between READY and post-reset IDLE")
+        reset_text = log[log.find("udp: Received 1 bytes: FF"):]
+        if not reset_text.startswith("udp: Received 1 bytes: FF") or "l_netsio: COLD_RESET" not in reset_text:
+            raise ProjectionMismatch("native-reset-to-idle: captured reset did not reach the production ingress")
+
     physical_observed = []
     for ordinal, (identifier, position) in enumerate(zip(expanded_ids, command_positions)):
         fixture = fixtures[identifier]
@@ -292,20 +314,20 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
 
         command = fixture["command"]
         controls, response_payload, response_checksum = _fixture_reply(fixture, command)
-        if identifier == "w-core-dispatch":
+        if command == "W":
             if controls != [ord("A"), ord("C")] or response_payload or response_checksum is not None:
-                raise ProjectionError("w-core-dispatch literal fixture no longer describes accepted W")
+                raise ProjectionError(f"{identifier}: literal fixture no longer describes accepted W")
             payload = _hex(fixture["payload"])
             expected_checksum = int(fixture["payload_checksum"], 16)
             incoming = [data for direction, data in window
                         if direction == "received" and data and data[0] in (0x02, 0x09)]
             if len(incoming) != 2:
-                raise ProjectionMismatch("w-core-dispatch: expected exactly one payload and one checksum datagram")
+                raise ProjectionMismatch(f"{identifier}: expected exactly one payload and one checksum datagram")
             data_frame, checksum_frame = incoming
             if len(data_frame) != len(payload) + 2 or data_frame[1:-1] != payload:
-                raise ProjectionMismatch("w-core-dispatch: payload differs from literal fixture")
+                raise ProjectionMismatch(f"{identifier}: payload differs from literal fixture")
             if len(checksum_frame) != 4 or checksum_frame[:2] != bytes((0x09, expected_checksum)):
-                raise ProjectionMismatch("w-core-dispatch: payload checksum differs from literal fixture")
+                raise ProjectionMismatch(f"{identifier}: payload checksum differs from literal fixture")
             response_packets = _native_response_datagrams(window)
             _assert_response_packets(identifier, response_packets, [
                 # NetSIO's receive grant includes the SIO checksum byte; the
@@ -362,6 +384,11 @@ def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
 def compare_netsio_native_wrong_r_retention(log, manifest=None, fixture_data=None):
     """Byte-verify real wrong-length-R retention through NetSIO."""
     return compare_netsio_native_projection(log, "native-wrong-r-retention", manifest, fixture_data)
+
+
+def compare_netsio_native_reset_to_idle(log, manifest=None, fixture_data=None):
+    """Byte-verify the real NetSIO reset while a native response is queued."""
+    return compare_netsio_native_projection(log, "native-reset-to-idle", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):

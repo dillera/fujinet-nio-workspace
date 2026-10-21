@@ -60,10 +60,12 @@
     {
       "id": "native-reset-to-idle",
       "operations": [
-        {"fixture": "w-idle", "observe": ["command", "data", "response"]},
-        {"fixture": "p-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "w-core-dispatch", "observe": ["command", "data", "response"]},
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
         {"fixture": "reset-clears", "observe": ["command", "response", "state"]},
-        {"fixture": "w-idle", "observe": ["command", "data", "response"]}
+        {"fixture": "w-core-dispatch-after-reset", "observe": ["command", "data", "response"]},
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "r-core-dispatch-after-reset", "observe": ["command", "response", "state"]}
       ]
     },
     {

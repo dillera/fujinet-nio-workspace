@@ -166,6 +166,58 @@ class VirtualProjectionTests(unittest.TestCase):
                 log.replace(wrong_r_and_retained_p, wrong_r_and_retained_p.replace("02 02 09 00", "02 02 08 00")),
                 self.manifest)
 
+    def test_netsio_reset_to_idle_requires_captured_reset_and_distinct_second_dispatch(self):
+        def read(frame, sequence, response):
+            return [f"udp: Received 7 bytes: 02 {frame} {sequence:02X}", *response]
+
+        q = ["udp: Sending 6 bytes: 81 01 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+             "udp: Sending 5 bytes: 02 01 00 02 00", "udp: Sending 2 bytes: 01 03"]
+        w = ["udp: Sending 6 bytes: 81 02 01 41 07 00",
+             "udp: Received 8 bytes: 02 01 02 06 00 09 00 03",
+             "udp: Received 4 bytes: 09 12 04 12",
+             "udp: Sending 6 bytes: 81 04 01 41 00 00", "udp: Sending 2 bytes: 01 43"]
+        p_ready = ["udp: Sending 6 bytes: 81 05 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+                   "udp: Sending 4 bytes: 02 02 09 00", "udp: Sending 2 bytes: 01 0B"]
+        p_idle = ["udp: Sending 6 bytes: 81 06 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+                  "udp: Sending 4 bytes: 02 00 00 00", "udp: Sending 2 bytes: 01 00"]
+        second_w = ["udp: Sending 6 bytes: 81 07 01 41 07 00",
+                    "udp: Received 8 bytes: 02 01 03 06 00 0A 00 08",
+                    "udp: Received 4 bytes: 09 14 09 14",
+                    "udp: Sending 6 bytes: 81 09 01 41 00 00", "udp: Sending 2 bytes: 01 43"]
+        second_p = ["udp: Sending 6 bytes: 81 0A 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+                    "udp: Sending 4 bytes: 02 02 09 00", "udp: Sending 2 bytes: 01 0B"]
+        second_r = ["udp: Sending 6 bytes: 81 0B 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+                    "udp: Sending 10 bytes: 02 01 03 09 00 0E 01 00 33 CC", "udp: Sending 2 bytes: 01 1C"]
+        final_idle = ["udp: Sending 6 bytes: 81 0C 01 41 00 00", "udp: Sending 2 bytes: 01 43",
+                      "udp: Sending 4 bytes: 02 00 00 00", "udp: Sending 2 bytes: 01 00"]
+        log = "\n".join((
+            *read("7F 51 00 00 D0", 1, q),
+            *read("7F 57 06 00 DC", 2, w),
+            "core-dispatch fixture route invocation 1",
+            *read("7F 50 00 00 CF", 5, p_ready),
+            "udp: Received 1 bytes: FF", "l_netsio: COLD_RESET",
+            *read("7F 50 00 00 CF", 6, p_idle),
+            *read("7F 57 06 00 DC", 7, second_w),
+            "core-dispatch fixture route invocation 2",
+            *read("7F 50 00 00 CF", 10, second_p),
+            *read("7F 52 09 00 DA", 11, second_r),
+            *read("7F 50 00 00 CF", 12, final_idle),
+        ))
+        observed = projection.compare_netsio_native_reset_to_idle(log, self.manifest)
+        self.assertEqual([item["fixture"] for item in observed], [
+            "q-idle", "w-core-dispatch", "p-core-dispatch-ready", "reset-clears",
+            "w-core-dispatch-after-reset", "p-core-dispatch-ready",
+            "r-core-dispatch-after-reset", "reset-clears",
+        ])
+        self.assertEqual(observed[6]["response"]["payload"], "01 03 09 00 0e 01 00 33 cc")
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_netsio_native_reset_to_idle(
+                log.replace("udp: Received 1 bytes: FF\n", "", 1), self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_netsio_native_reset_to_idle(
+                log.replace("udp: Sending 4 bytes: 02 00 00 00", "udp: Sending 4 bytes: 02 00 01 00", 1),
+                self.manifest)
+
     def test_result_is_adapter_scoped_and_missing_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
