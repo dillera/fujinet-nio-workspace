@@ -278,6 +278,45 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
 Altirra's embedded native device, the cross-adapter projection runner, and
 Story 2.3 completion remain intentionally outstanding.
 
+## Implementation status: embedded AltirraSDL adapter
+
+The embedded `ATDeviceFujiNetNIO` now composes the production
+`AtariSioNioFrontend(mCore.routingManager())` directly.  It constructs the
+SIO-manager-validated five-byte command frame, receives literal W data plus
+its checksum, and schedules only the endpoint result through Altirra's
+existing ACK/NAK/COMPLETE/data queue.  The retired worker, FujiBus channel,
+SLIP setup, `$71` alias, padded reads, default read size, and read retry loop
+are absent.  `ColdReset()` and the embedded Fuji reset hook reset the endpoint
+explicitly; a command abort only aborts an unfinished W.
+
+`altirra-fujinet-nio-sio` compiles the production device and invokes its real
+`IATDeviceSIO` callbacks with a recording Altirra scheduling interface.  It
+loads the independent `nio_v1.json` vectors and proves the command/data
+checksums, Q reply, `$71` exclusion, unsupported-command NAK, exact W data
+length plus checksum, routing to the embedded real core, ready P response,
+wrong-R retention, terminal-R payload lifetime, malformed-W rejection and
+fresh-W recovery, and reset-to-idle.  Command-frame checksum rejection itself
+remains correctly owned by Altirra's SIO manager before this callback boundary.
+
+Executed evidence for this increment:
+
+```sh
+source "$NIO_WORKSPACE/scripts/env.sh"
+python3 -m unittest discover -s integration-tests/atari-sio/tests -v
+# 19 passed
+
+cd repos/AltirraSDL
+cmake -S . -B build/linux-debug -DALTIRRA_BUILD_TESTS=ON
+cmake --build build/linux-debug --target altirra-fujinet-nio-sio-test -j2
+ctest --test-dir build/linux-debug -R '^altirra-fujinet-nio-sio$' --output-on-failure
+# 1/1 passed
+cmake --build build/linux-debug --target AltirraSDL -j2
+# passed
+```
+
+The cross-adapter projection runner and Story 2.3 completion remain
+intentionally outstanding.
+
 ## Out of scope
 
 Public `fn_*` Clock/File/Network/Disk guest-XEX acceptance, CIO `N:`/BASIC
