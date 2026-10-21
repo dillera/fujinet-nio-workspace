@@ -3,6 +3,7 @@ title: 'Boot the selected configuration or mapped ATR disk'
 type: 'feature'
 created: '2026-10-20'
 status: 'in-progress'
+baseline_commit: '6756149d4f56743dbb9a98fce43dfd63ef79ec59'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'

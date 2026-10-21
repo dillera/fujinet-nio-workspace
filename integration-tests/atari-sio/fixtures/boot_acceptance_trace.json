@@ -1,0 +1,34 @@
+{
+  "format": "atari-story-1.3-boot-v1",
+  "atr_sha256": "ad27f37b54056a01c4fa45671c5e97c228b3e5d51fe7f11d54030e370bd55bc4",
+  "signature": {
+    "address": "0x06f0",
+    "before_cold_boot": "00000000",
+    "after_boot": "4e494f21"
+  },
+  "stable_loop_pc_range": [
+    "0x0624",
+    "0x0627"
+  ],
+  "native": {
+    "signature": "NIO!",
+    "pc": "0x0627"
+  },
+  "netsio": {
+    "signature": "NIO!",
+    "pc": "0x0627",
+    "trace": {
+      "d1_status": "31 53 00 00 84",
+      "boot_reads_128": [
+        "31 52 01 00 84",
+        "31 52 02 00 85",
+        "31 52 03 00 86"
+      ],
+      "first_dd_read_256": "31 52 69 01 ED",
+      "diskservice_counters": {
+        "after_boot_sectors": "read_req=3 read_sec=3 read_bytes=384",
+        "sector_361_delta_bytes": 256
+      }
+    }
+  }
+}
