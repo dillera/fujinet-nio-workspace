@@ -59,7 +59,7 @@ def validate_manifest(manifest, nio_ids=None, disk_ids=None):
         raise ProjectionError("projection must exclude every obsolete native path")
 
     projection_ids = set()
-    for projection in manifest.get("projections", ()): 
+    for projection in manifest.get("projections", ()):
         identifier = projection.get("id")
         if not isinstance(identifier, str) or not identifier or identifier in projection_ids:
             raise ProjectionError("projection IDs must be unique nonempty strings")
@@ -76,7 +76,7 @@ def validate_manifest(manifest, nio_ids=None, disk_ids=None):
                 raise ProjectionError(f"{identifier}: expected observations are required")
 
     boot_ids = set()
-    for projection in manifest.get("boot_projections", ()): 
+    for projection in manifest.get("boot_projections", ()):
         identifier = projection.get("id")
         if not isinstance(identifier, str) or not identifier or identifier in boot_ids:
             raise ProjectionError("boot projection IDs must be unique nonempty strings")
