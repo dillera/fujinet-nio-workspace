@@ -12,6 +12,15 @@ def sio_checksum(data):
     return total
 
 
+def valid_raw_fujibus_packet(data):
+    if len(data) < 6 or (data[2] | data[3] << 8) != len(data):
+        return False
+    expected = data[4]
+    check = bytearray(data)
+    check[4] = 0
+    return sio_checksum(check) == expected
+
+
 class NioV1FixtureTest(unittest.TestCase):
     def test_contract_literals(self):
         self.assertEqual((DATA["wire_revision"], DATA["address"], DATA["capacity"]), (1, 0x7f, 512))
@@ -93,3 +102,20 @@ class NioV1FixtureTest(unittest.TestCase):
             self.assertEqual(vector["command"], "Q")
             self.assertEqual((vector["aux"], vector["dcb_count"]), (0, 4))
             self.assertEqual(vector["client_outcome"], "transport-error-baseline")
+
+    def test_core_dispatch_pair_is_literal_raw_fujibus(self):
+        scenarios = {s["id"]: s for s in DATA["scenarios"]}
+        pairs = {p["id"]: p for p in DATA["packet_pairs"]}
+        self.assertEqual(set(pairs), {"core-dispatch"})
+        pair = pairs["core-dispatch"]
+        request = scenarios[pair["request_scenario"]]
+        response = scenarios[pair["response_scenario"]]
+        self.assertEqual((request["command"], response["command"]), ("W", "R"))
+        self.assertEqual(request["aux"], len(bytes.fromhex(request["payload"])))
+        self.assertEqual(response["aux"], len(bytes.fromhex(response["payload"])))
+        self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(request["payload"])))
+        self.assertTrue(valid_raw_fujibus_packet(bytes.fromhex(response["payload"])))
+        self.assertEqual(sio_checksum(bytes.fromhex(request["payload"])),
+                         int(request["payload_checksum"], 16))
+        self.assertEqual(sio_checksum(bytes.fromhex(response["payload"])),
+                         int(response["payload_checksum"], 16))
