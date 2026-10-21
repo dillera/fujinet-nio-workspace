@@ -58,7 +58,7 @@ criterion.
   does not set a `DiskService` mount.  Keep that API for its existing FujiBus
   RestoreBoot callers, but do not mistake it for bootstrap projection.  Make the
   restore-then-project ordering explicit so a future refactor cannot reverse it.
-- The packaged input already exists: `make TARGET=atari boot-disk` stages
+- The production configuration medium already exists: `make TARGET=atari boot-disk` stages
   `fhost.xex`, `fls.xex`, `fin.xex`, `fmount.xex`, `fdrive.xex`, and `fapp.xex`
   from `boot-disk/manifests/atari.yaml`, builds the pinned MyPicoDOS
   `picobootcode-dd.bin`, then uses `dir2atr -m -D -B` to make
@@ -66,16 +66,15 @@ criterion.
   `install-boot-disk` copies that same image to both firmware boot-asset roots.
   Reuse this pipeline; do not create another ATR builder or commit generated ATRs.
 
-The existing bundle is a current utility/configuration bundle, not the Epic 2
-public-API NIO acceptance XEX and not a general-purpose DOS claim.  Story 2.4
-owns the Clock/Network/File/Disk/recovery/BASIC guest acceptance application;
-Story 2.2 owns the native endpoint it needs.  This story may launch a present
-bundle program solely to prove that the packaged ATR reaches an Atari launch
-point, but must not make an Epic 2 service assertion.
+The existing production bundle is a current utility/configuration bundle, not
+the Epic 2 public-API NIO acceptance XEX and not a general-purpose DOS claim.
+It remains the Story 1.1 source-image fixture medium. Story 2.4 owns the
+Clock/Network/File/Disk/recovery/BASIC guest acceptance application; Story 2.2
+owns the native endpoint it needs.
 
 ## Atari boot/launch contract for this story
 
-The generated golden currently has SHA-256
+The production `autorun.atr` fixture golden has SHA-256
 `8f1cd8f689936ab5c94def50176ecab721f78a739e9aa117b0908c8b255c24f4`.
 Its sector 1 header is `00 03 00 08`: standard boot flags, three 128-byte boot
 sectors, and load address `$0800`.  Atari OS must issue standard `D1:` READ
@@ -84,16 +83,21 @@ command frames (`0x31, 0x52`) for one-based sectors 1, 2, and 3, each with a
 directory/file reads are image- and PicoBoot-dependent; record them from the
 actual run rather than inventing a fixed list.  Every recorded exchange must be
 a Story 1.1-supported D1--D8 command with its observed transfer length and
-terminal phase.  A successful trace ends at an observable launch sentinel from
-the bundled program (or the emulator's documented program-entry state), not at
-the first three sector replies.
+terminal phase. A successful trace ends at an observable launch sentinel, not
+at the first three sector replies. The executable acceptance image is
+deliberately separate from the production fixture: it contains only
+`coltest.xex`, the minimal colour-changing/signature program. Its ATR SHA-256
+is pinned by `integration-tests/atari-sio/fixtures/boot_acceptance_trace.json`;
+the current value is
+`486fc7b66e79dadb81018024b61d18cb9b7c0f8701a2d33f0a040a4d3e0f8ddc`.
 
-The evidence fixture records: boot-image SHA-256, PicoBoot artifact identity,
-manifest digest/list, emulator and bridge revisions, generated firmware config,
-ordered command/reply trace, and launch sentinel.  It must assert the initial
-three reads exactly and validate all later trace rows against the literal disk
-matrix.  Rebuilding the image and rerunning the same virtual lane must reproduce
-the trace fixture or deliberately update it with the image hash/manifest change.
+That compact fixture records the acceptance-ATR hash, `NIO!` signature address,
+stable-loop range, native/NetSIO launch result, and required D1 trace frames.
+It asserts the initial three reads exactly, a later 256-byte DD read, payload
+checksum validity, and the application sentinel. Rebuilding the acceptance ATR
+requires a deliberate fixture hash update and a passing virtual rerun; changes
+to the production manifest/PicoBoot retain their independently pinned Story 1.1
+source-image hash.
 
 ## Boundaries
 
@@ -146,9 +150,11 @@ request to make a physical boot claim.
   staged filenames, then use `make TARGET=atari install-boot-disk` so the exact
   generated `autorun.atr` becomes the ESP32 flash asset at
   `repos/fujinet-nio/distfiles/esp32-data/boot/atari/autorun.atr`.
-- Do not add a separate image copy to tests.  The existing Story 1.1 source-
-  image metadata is the golden-input seam; update it only when an intentional
-  manifest/PicoBoot/image revision changes and then refresh the trace evidence.
+- Do not copy the production image into tests. Story 1.1 source-image metadata
+  remains the production golden-input seam and changes only with an intentional
+  manifest/PicoBoot/image revision. The dedicated single-file acceptance ATR is
+  instead rebuilt from `boot_acceptance.s`, staged as `coltest.xex`, and pinned
+  independently by `boot_acceptance_trace.json`.
 
 ### 3. Add an executable virtual boot lane and trace oracle
 
@@ -162,8 +168,9 @@ request to make a physical boot claim.
   portable-frontend consumer, deliberately reusable by Story 2.3 rather than
   a Story 2.3 conformance framework.
 - Add `configs/atari/profiles/atari-nio-config-boot.yaml` plus a focused
-  `integration-tests/atari-sio/tests/test_virtual_config_boot.py` runner.  It
-  boots the installed `autorun.atr` through the NetSIO bridge with
+  `integration-tests/atari-sio/run_boot_acceptance.py` runner. It maps the
+  separately built acceptance ATR at the config `autorun.atr` URI through the
+  NetSIO bridge with
   `sio_patch: false` and `accurate_disk: true`, using the existing
   `scripts/atari-run` profile renderer and Altirra Bridge control API rather
   than a second emulator runner.
@@ -182,8 +189,8 @@ request to make a physical boot claim.
 
 ## Acceptance criteria
 
-1. Given config mode, valid installed `boot.config_uri`, and no restored D1,
-   when a cold virtual Atari starts, then D1 lazily mounts the packaged ATR and
+1. Given config mode, a valid acceptance-ATR `boot.config_uri`, and no restored D1,
+   when a cold virtual Atari starts, then D1 lazily mounts that ATR and
    the OS completes its actual PicoBoot path and reaches the launch sentinel;
    the stored trace contains initial READ sectors 1, 2, and 3 with 128-byte
    transfers and all later observed exchanges are valid v1 disk exchanges.
@@ -197,9 +204,10 @@ request to make a physical boot claim.
    D1 URI and access mode.  A missing or failed config ATR reports failure and
    never falls back to persisted D1.
 4. Given the supported environment, when the existing core-apps boot-disk and
-   install targets run, then the installed firmware asset is byte-identical to
-   the generated ATR and the trace evidence records its hash and staged manifest
-   contents.
+   install targets run, then the installed production firmware asset is
+   byte-identical to its generated ATR and retains its Story 1.1 source-image
+   hash/manifest evidence. The separate acceptance ATR retains its own trace
+   hash and launch evidence.
 5. Given the virtual lane passes, its report explicitly says it does not prove
    ESP32 UART/GPIO timings, open-drain idle behavior, cable contention, or a
    real Atari boot.  Those are Epic 3 gates.  A clean classic-ESP32 Atari v1
@@ -222,12 +230,11 @@ cd ../fujinet-nio && ./build.sh -cp fujibus-pty-debug && \
 
 ./build.sh -cb
 
-cd ../.. && ./scripts/atari-run altirra --profile configs/atari/profiles/atari-nio-config-boot.yaml
+cd ../.. && ./scripts/build.sh atari-boot-acceptance
 ```
 
-The final command becomes the executable virtual boot gate only after its
-profile, trace capture, launch sentinel, and required Altirra/bridge inputs are
-implemented.  If the licensed ROMs, `AltirraSDL`, bridge checkout, `dir2atr`,
+The final command is the executable virtual boot gate. If the licensed ROMs,
+`AltirraSDL`, bridge checkout, `dir2atr`,
 or cc65 toolchain are unavailable, report that exact dependency as an
 environment blocker; do not replace this with sector-fixture success.  Run the
 classic ESP32 `./build.sh -cb` after touching ESP32 bootstrap files; its clean
@@ -282,7 +289,7 @@ policy or implementation blockers.
   launch gate.  A named stash retains only generated AltirraBridge Python
   bytecode caches from the earlier probe; it contains no source or settings.
 
-### Source-built DD PicoBoot and virtual launch — 2026-10-20
+### Historical FAPP/PicoBoot investigation — 2026-10-20
 
 - `repos/MyPicoDOS` is pinned at `933c1040` on
   `feature/story-1.3-dd-bootq`.  Its unmodified `bootq` source builds with
@@ -312,7 +319,7 @@ criterion was superseded by the dedicated page-6 acceptance XEX and its
 signature-plus-loop gate recorded below; that executable test observes actual
 D1 traffic through the production frontend and continued program execution.
 
-### Prior verification record — 2026-10-20
+### Historical verification record — 2026-10-20
 
 - The controlled reference found no post-loader transport divergence. With the
   identical ATR, native Altirra (no NIO, hub, or custom device) and the
@@ -362,10 +369,10 @@ D1 traffic through the production frontend and continued program execution.
 - The primary acceptance payload is
   `integration-tests/atari-sio/boot-app/boot_acceptance.s`, not FAPP. It is a
   startup-free page-6 XEX that changes the display colours, writes `NIO!` to
-  `$06F0`--`$06F3`, and loops at `$0624`. Its separate double-density ATR is
-  produced by the pinned source-built PicoBoot and existing `dir2atr` pipeline;
-  it does not replace the production configuration `autorun.atr` or Story 1.1
-  goldens.
+  `$06F0`--`$06F3`, and loops at `$0624`. The single directory entry is named
+  `coltest.xex`; its separate double-density ATR is produced by the pinned
+  source-built PicoBoot and existing `dir2atr` pipeline. It does not replace
+  the production configuration `autorun.atr` or Story 1.1 goldens.
 - `./scripts/build.sh atari-boot-acceptance` rebuilds AltirraSDL, the POSIX
   Atari NetSIO firmware preset, and the test ATR, then runs native and
   production NetSIO cold boots. The committed compact contract is

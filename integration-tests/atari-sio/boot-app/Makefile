@@ -17,10 +17,10 @@ $(XEX): boot_acceptance.s atari-xex.cfg | $(OUT)
 $(PICOBOOT):
 	$(MAKE) -C $(ROOT)/repos/MyPicoDOS picobootcode-dd.bin
 
-$(ATR): $(XEX) $(PICOBOOT) | $(OUT)
+$(ATR): $(XEX) $(PICOBOOT) Makefile | $(OUT)
 	rm -rf $(OUT)/stage
 	mkdir -p $(OUT)/stage
-	cp $(XEX) $(OUT)/stage/fapp.xex
+	cp $(XEX) $(OUT)/stage/coltest.xex
 	cd $(APPS) && dir2atr -m -D -B $(PICOBOOT) $(abspath $@) $(abspath $(OUT)/stage)
 
 clean:
