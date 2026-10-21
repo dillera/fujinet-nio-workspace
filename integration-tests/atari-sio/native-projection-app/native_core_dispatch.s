@@ -24,9 +24,12 @@ STEP    = RESULT+4
 Q_REPLY = $0810
 P_READY = $0820
 R_REPLY = $0830
+R_WRONG = $0840
 P_IDLE  = $0850
 REQUEST = $0860
 COUNT   = $0870
+STATUS  = $0880
+P_RETAIN = $0890
 
 .code
 _main:
@@ -50,6 +53,7 @@ _main:
         ldy #>Q_REPLY
         lda #'Q'
         jsr call_sio
+        sta STATUS
         cmp #1
         beq @q_sio_ok
         jmp fail
@@ -75,6 +79,7 @@ _main:
         ldy #>REQUEST
         lda #'W'
         jsr call_sio
+        sta STATUS+1
         cmp #1
         beq @w_sio_ok
         jmp fail
@@ -91,20 +96,75 @@ _main:
         ldy #>P_READY
         lda #'P'
         jsr call_sio
+        sta STATUS+2
         cmp #1
-        bne fail
+        beq @pready_sio_ok
+        jmp fail
+@pready_sio_ok:
         ldx #0
 @pready:
         lda P_READY,x
         cmp p_ready_expected,x
-        bne fail
+        beq @pready_byte_ok
+        jmp fail
+@pready_byte_ok:
         inx
         cpx #3
         bne @pready
 
+ .ifdef WRONG_R_RETENTION
+        ; A wrong R AUX must NAK.  Its unsuccessful SIOV result must leave
+        ; the endpoint response owned by the original accepted W.
+        lda #4
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<R_WRONG
+        ldy #>R_WRONG
+        lda #'R'
+        jsr call_sio
+        sta STATUS+3
+        cmp #1
+        bne @wrong_r_nak_ok
+        jmp fail
+@wrong_r_nak_ok:
+        ; The retained response is still ready with its original length.
+        lda #5
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_RETAIN
+        ldy #>P_RETAIN
+        lda #'P'
+        jsr call_sio
+        sta STATUS+4
+        cmp #1
+        beq @pretained_sio_ok
+        jmp fail
+@pretained_sio_ok:
+        ldx #0
+@pretained:
+        lda P_RETAIN,x
+        cmp p_ready_expected,x
+        beq @pretained_byte_ok
+        jmp fail
+@pretained_byte_ok:
+        inx
+        cpx #3
+        bne @pretained
+
+        ; The correct terminal R can now consume the unchanged response.
+        lda #6
+        sta STEP
+ .else
         ; R: consume the exact FujiBus response owned by the endpoint.
         lda #4
         sta STEP
+ .endif
         lda #9
         sta COUNT
         lda #0
@@ -113,6 +173,11 @@ _main:
         ldy #>R_REPLY
         lda #'R'
         jsr call_sio
+ .ifdef WRONG_R_RETENTION
+        sta STATUS+5
+ .else
+        sta STATUS+3
+ .endif
         cmp #1
         bne fail
         ldx #0
@@ -124,7 +189,11 @@ _main:
         bne @r
 
         ; Terminal R consumed the response; P now reports canonical idle.
+ .ifdef WRONG_R_RETENTION
+        lda #7
+ .else
         lda #5
+ .endif
         sta STEP
         lda #3
         sta COUNT
@@ -134,6 +203,11 @@ _main:
         ldy #>P_IDLE
         lda #'P'
         jsr call_sio
+ .ifdef WRONG_R_RETENTION
+        sta STATUS+6
+ .else
+        sta STATUS+4
+ .endif
         cmp #1
         bne fail
         ldx #0

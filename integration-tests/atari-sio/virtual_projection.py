@@ -130,20 +130,27 @@ def sio_checksum(payload):
     return total
 
 
-def native_core_dispatch_fixture_ids(manifest=None):
-    """Return the guest sequence around the manifest-owned core projection.
-
-    `native-core-dispatch` owns W/P/R.  The required Q preflight and terminal
-    idle poll are existing literal vectors, not another response generator.
-    """
+def native_projection_fixture_ids(projection_id, manifest=None):
+    """Return a guest sequence with its common Q preflight and idle poll."""
     manifest = load_manifest() if manifest is None else manifest
     validate_manifest(manifest)
     projection = next(item for item in manifest["projections"]
-                      if item["id"] == "native-core-dispatch")
+                      if item["id"] == projection_id)
     ids = expected_operation_ids(projection)
-    if ids != ["w-core-dispatch", "p-core-dispatch-ready", "r-core-dispatch"]:
-        raise ProjectionError("native-core-dispatch projection no longer names the approved W/P/R sequence")
+    approved = {
+        "native-core-dispatch": ["w-core-dispatch", "p-core-dispatch-ready", "r-core-dispatch"],
+        "native-wrong-r-retention": ["w-core-dispatch", "p-core-dispatch-ready",
+                                      "r-wrong-length-retains", "p-core-dispatch-ready",
+                                      "r-core-dispatch"],
+    }
+    if projection_id not in approved or ids != approved[projection_id]:
+        raise ProjectionError(f"{projection_id}: projection no longer names the approved literal sequence")
     return ["q-idle", *ids, "reset-clears"]
+
+
+def native_core_dispatch_fixture_ids(manifest=None):
+    """Compatibility helper for the established core-dispatch projection."""
+    return native_projection_fixture_ids("native-core-dispatch", manifest)
 
 
 def _hex(value):
@@ -223,8 +230,8 @@ def _assert_response_packets(identifier, packets, expected):
             raise ProjectionError(f"{identifier}: unknown response packet kind {kind!r}")
 
 
-def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
-    """Byte-verify the real NetSIO trace for the approved guest sequence.
+def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_data=None):
+    """Byte-verify a real NetSIO trace for an approved guest sequence.
 
     This consumes the production adapter's UDP capture.  It does not create a
     peer or call the frontend; it only checks observed command, control, data,
@@ -234,18 +241,44 @@ def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
     if log.count("core-dispatch fixture route invocation 1") != 1 or \
        "core-dispatch fixture route invocation 2" in log:
-        raise ProjectionMismatch("native-core-dispatch did not route exactly once through the real core fixture")
+        raise ProjectionMismatch(f"{projection_id}: did not route exactly once through the real core fixture")
     fixtures = {item["id"]: item for item in fixture_data["scenarios"]}
-    ids = native_core_dispatch_fixture_ids(manifest)
+    ids = native_projection_fixture_ids(projection_id, manifest)
     events = _nio_datagrams(log)
     command_positions = [index for index, (direction, data) in enumerate(events)
                          if direction == "received" and len(data) == 7 and data[0] == 0x02
                          and data[1] == 0x7f and data[2] in b"QWPR"]
-    if len(command_positions) != len(ids):
-        raise ProjectionMismatch(f"expected {len(ids)} native command frames, found {len(command_positions)}")
 
-    observed = []
-    for ordinal, (identifier, position) in enumerate(zip(ids, command_positions)):
+    # Atari OS SIOV retries NAKed requests before returning its NAK status.
+    # Treat that bounded, contiguous burst as one logical wrong-R operation,
+    # while still checking every physical command and NAK response below.
+    expanded_ids = []
+    position_index = 0
+    for identifier in ids:
+        expected_command = _hex(fixtures[identifier]["frame"])
+        if identifier == "r-wrong-length-retains":
+            attempts = 0
+            while position_index < len(command_positions):
+                observed_command = events[command_positions[position_index]][1][1:6]
+                if observed_command != expected_command:
+                    break
+                expanded_ids.append(identifier)
+                position_index += 1
+                attempts += 1
+            if attempts == 0:
+                raise ProjectionMismatch("r-wrong-length-retains: SIOV did not issue the wrong-length R")
+            continue
+        if position_index >= len(command_positions):
+            raise ProjectionMismatch(f"{identifier}: missing native command frame")
+        if events[command_positions[position_index]][1][1:6] != expected_command:
+            raise ProjectionMismatch(f"{identifier}: unexpected native command ordering")
+        expanded_ids.append(identifier)
+        position_index += 1
+    if position_index != len(command_positions):
+        raise ProjectionMismatch(f"unexpected extra native command frames: found {len(command_positions)}")
+
+    physical_observed = []
+    for ordinal, (identifier, position) in enumerate(zip(expanded_ids, command_positions)):
         fixture = fixtures[identifier]
         expected_command = _hex(fixture["frame"])
         direction, command_datagram = events[position]
@@ -286,26 +319,49 @@ def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
                                                     chr(response_packets[2][1])],
                                        "payload": "", "checksum": None}})
         else:
-            if controls != [ord("A"), ord("C")]:
-                raise ProjectionError(f"{identifier}: native-core-dispatch fixture must use A/C control replies")
-            expected = [("sync", controls[0], 0), ("byte", controls[1], 0)]
+            if not controls:
+                raise ProjectionError(f"{identifier}: projection fixture must describe a control reply")
+            expected = [("sync", controls[0], 0)]
+            expected.extend(("byte", control, 0) for control in controls[1:])
             if response_payload:
                 expected.extend([("payload", response_payload, 0),
                                  ("checksum", response_checksum, 0)])
             response_packets = _native_response_datagrams(window)
             _assert_response_packets(identifier, response_packets, expected)
-            actual_payload = response_packets[2][1:] if response_payload else b""
-            actual_checksum = response_packets[3][1] if response_payload else None
-            entry.update({"response": {"controls": [chr(response_packets[0][3]),
-                                                   chr(response_packets[1][1])],
+            actual_controls = [chr(response_packets[0][3])]
+            actual_controls.extend(chr(packet[1]) for packet in response_packets[1:len(controls)])
+            payload_index = len(controls)
+            actual_payload = response_packets[payload_index][1:] if response_payload else b""
+            actual_checksum = response_packets[payload_index + 1][1] if response_payload else None
+            entry.update({"response": {"controls": actual_controls,
                                         "payload": actual_payload.hex(' '),
                                         "checksum": (None if actual_checksum is None
                                                      else f"{actual_checksum:02x}")}})
-        observed.append(entry)
+        physical_observed.append(entry)
 
-    core = next(item for item in manifest["projections"] if item["id"] == "native-core-dispatch")
-    compare_observed_operations(core, [entry["fixture"] for entry in observed[1:4]])
+    observed = []
+    for entry in physical_observed:
+        if entry["fixture"] == "r-wrong-length-retains" and observed and \
+           observed[-1]["fixture"] == "r-wrong-length-retains":
+            observed[-1]["siov_attempts"] += 1
+        else:
+            if entry["fixture"] == "r-wrong-length-retains":
+                entry["siov_attempts"] = 1
+            observed.append(entry)
+
+    projection = next(item for item in manifest["projections"] if item["id"] == projection_id)
+    compare_observed_operations(projection, [entry["fixture"] for entry in observed[1:-1]])
     return observed
+
+
+def compare_netsio_native_core_dispatch(log, manifest=None, fixture_data=None):
+    """Byte-verify the established real NetSIO core-dispatch trace."""
+    return compare_netsio_native_projection(log, "native-core-dispatch", manifest, fixture_data)
+
+
+def compare_netsio_native_wrong_r_retention(log, manifest=None, fixture_data=None):
+    """Byte-verify real wrong-length-R retention through NetSIO."""
+    return compare_netsio_native_projection(log, "native-wrong-r-retention", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):

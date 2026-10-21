@@ -41,10 +41,11 @@
     {
       "id": "native-wrong-r-retention",
       "operations": [
-        {"fixture": "w-idle", "observe": ["command", "data", "response"]},
-        {"fixture": "p-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "w-core-dispatch", "observe": ["command", "data", "response"]},
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
         {"fixture": "r-wrong-length-retains", "observe": ["command", "response", "state"]},
-        {"fixture": "r-ready", "observe": ["command", "response", "state"]}
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "r-core-dispatch", "observe": ["command", "response", "state"]}
       ]
     },
     {

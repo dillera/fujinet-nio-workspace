@@ -6,12 +6,14 @@ from pathlib import Path
 
 from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_netsio_native_core_dispatch,
+                                compare_netsio_native_wrong_r_retention,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
 
 ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
+NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 TRACE_FIXTURE = ROOT / "integration-tests/atari-sio/fixtures/boot_acceptance_trace.json"
 PROFILE = ROOT / "configs/atari/profiles/atari-nio-config-boot.yaml"
 ALTIRRA = ROOT / "repos/AltirraSDL/build/linux-debug/src/AltirraSDL/AltirraSDL"
@@ -25,6 +27,8 @@ PROJECTION_Q_REPLY = 0x0810
 PROJECTION_P_READY = 0x0820
 PROJECTION_R_REPLY = 0x0830
 PROJECTION_P_IDLE = 0x0850
+PROJECTION_STATUSES = 0x0880
+PROJECTION_P_RETAIN = 0x0890
 # A bridge pause can capture any instruction-boundary phase of the three-byte
 # JMP $0624 loop, including the post-operand PC just before its target applies.
 LOOP_PCS = {LOOP, LOOP + 1, LOOP + 2, LOOP + 3}
@@ -460,7 +464,7 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         cleanup_temps(temps) if 'temps' in locals() else None
         stop(ps)
 
-def inspect_native_core_dispatch(token, evidence_dir, timeout):
+def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention=False):
     """Wait for the real guest XEX and capture its independently checked data."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -478,26 +482,34 @@ def inspect_native_core_dispatch(token, evidence_dir, timeout):
                     'p_idle': bridge.peek(PROJECTION_P_IDLE, 3).hex(' '),
                     'terminal_dcb': decode_dcb(bridge.peek(0x0300, 12)),
                 }
+                if wrong_r_retention:
+                    state.update({
+                        'wrong_r_status': bridge.peek(PROJECTION_STATUSES + 3, 1).hex(),
+                        'p_retained': bridge.peek(PROJECTION_P_RETAIN, 3).hex(' '),
+                        'siov_statuses': bridge.peek(PROJECTION_STATUSES, 7).hex(' '),
+                    })
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if result != b'NVP!':
-                    raise RuntimeError(f"native-core-dispatch guest failed at step {state['step']}")
+                    raise RuntimeError(f"native projection guest failed at step {state['step']}")
                 return state
             time.sleep(.05)
-    raise RuntimeError('native-core-dispatch guest did not reach a terminal result')
+    raise RuntimeError('native projection guest did not reach a terminal result')
 
-def run_netsio_native_core_dispatch(timeout, evidence_dir):
+def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False):
     """Run one literal native-v1 sequence through Altirra, hub, and NetSIO.
 
     This deliberately shares the deterministic boot runner's sidecars, reset
     ordering, Altirra profile, bridge, serial evidence, and cleanup.  The
     only alternate process is a real-core fixture route; it has no SIO peer.
     """
-    if not NATIVE_CORE_DISPATCH_XEX.is_file():
-        raise RuntimeError(f'native-core-dispatch XEX is missing: {NATIVE_CORE_DISPATCH_XEX}')
+    scenario_id = 'native-wrong-r-retention' if wrong_r_retention else 'native-core-dispatch'
+    program = NATIVE_WRONG_R_RETENTION_XEX if wrong_r_retention else NATIVE_CORE_DISPATCH_XEX
+    if not program.is_file():
+        raise RuntimeError(f'{scenario_id} XEX is missing: {program}')
     if not NATIVE_CORE_DISPATCH.is_file():
         raise RuntimeError(f'native-core-dispatch endpoint is missing: {NATIVE_CORE_DISPATCH}')
-    run = (Path(evidence_dir) / 'native-core-dispatch').resolve()
+    run = (Path(evidence_dir) / scenario_id).resolve()
     run.mkdir(parents=True, exist_ok=True)
     ps=[]
     try:
@@ -509,7 +521,7 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir):
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
         wait_log(run/'nio.log', 'Atari NetSIO projection initialized', timeout=15)
         before=set(Path('/tmp').glob('altirra-bridge-*.token'))
-        cmd, env, temps = altirra_command(False, trace_serial=True, program=NATIVE_CORE_DISPATCH_XEX)
+        cmd, env, temps = altirra_command(False, trace_serial=True, program=program)
         cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
         altirra_log=(run/'altirra.log').open('wb')
         ps.append(launch(cmd, cwd=run, env=env, stdout=altirra_log, stderr=subprocess.STDOUT))
@@ -520,7 +532,7 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir):
         from altirra_bridge import AltirraBridge
         with AltirraBridge.from_token_file(token) as bridge:
             bridge.resume()
-        result=inspect_native_core_dispatch(token, run, timeout)
+        result=inspect_native_core_dispatch(token, run, timeout, wrong_r_retention)
         altirra_log.flush()
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
@@ -537,6 +549,11 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir):
         if 'nio' in locals(): nio.close()
         cleanup_temps(temps) if 'temps' in locals() else None
         stop(ps)
+
+
+def run_netsio_native_wrong_r_retention(timeout, evidence_dir):
+    """Run the same production projection path with a wrong terminal R first."""
+    return run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=True)
 
 def write_netsio_boot_projection(run_result):
     """Write adapter-scoped virtual evidence from the existing boot lifecycle.
@@ -605,13 +622,67 @@ def write_netsio_native_core_dispatch_projection(run_result):
     result["result_path"] = str(path)
     return result
 
+
+def write_netsio_native_wrong_r_retention_projection(run_result):
+    """Record real wrong-R retention only after strict capture verification."""
+    run = Path(run_result["run_dir"])
+    manifest = validate_manifest(load_manifest())
+    trace = (run / "nio.log").read_text(errors="replace")
+    observed = compare_netsio_native_wrong_r_retention(trace, manifest)
+    statuses = run_result["siov_statuses"].split()
+    if (run_result["wrong_r_status"] == "01" or
+            len(statuses) != 7 or statuses[:3] != ["01", "01", "01"] or
+            statuses[4:] != ["01", "01", "01"] or
+            run_result["p_retained"] != "02 09 00" or
+            run_result["r_reply"] != "01 02 09 00 0d 01 00 aa 55" or
+            run_result["p_idle"] != "00 00 00"):
+        raise RuntimeError("guest did not retain and then consume the exact core-dispatch response")
+
+    wrong_nak, changed = re.subn(
+        r"(?s)(udp: Received 7 bytes: 02 7F 52 03 00 D4 [0-9A-F]{2}.*?"
+        r"udp: Sending 6 bytes: 81 [0-9A-F]{2} 01 )4E( 00 00)",
+        r"\g<1>45\g<2>", trace, count=1)
+    if changed != 1:
+        raise RuntimeError("could not create deliberate wrong-R NAK mutation")
+    try:
+        compare_netsio_native_wrong_r_retention(wrong_nak, manifest)
+    except ProjectionMismatch:
+        nak_negative_verified = True
+    else:
+        raise RuntimeError("mutated wrong-R NAK unexpectedly passed comparison")
+
+    retained_length, changed = re.subn(
+        r"(?s)(udp: Received 7 bytes: 02 7F 52 03 00 D4 [0-9A-F]{2}.*?"
+        r"udp: Sending 6 bytes: 81 [0-9A-F]{2} 01 4E 00 00.*?"
+        r"udp: Received 7 bytes: 02 7F 50 00 00 CF [0-9A-F]{2}.*?"
+        r"udp: Sending 4 bytes: 02 02 )09( 00)",
+        r"\g<1>08\g<2>", trace, count=1)
+    if changed != 1:
+        raise RuntimeError("could not create deliberate retained-response mutation")
+    try:
+        compare_netsio_native_wrong_r_retention(retained_length, manifest)
+    except ProjectionMismatch:
+        retained_negative_verified = True
+    else:
+        raise RuntimeError("mutated retained response unexpectedly passed comparison")
+
+    result = scenario_result("netsio", "native-wrong-r-retention", observed,
+                             evidence_paths_for_boot(run, "netsio"),
+                             passed=run_result["guest_result"] == "NVP!")
+    result["negative_wrong_r_nak_mutation_rejected"] = nak_negative_verified
+    result["negative_retained_response_mutation_rejected"] = retained_negative_verified
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = 'atari-sio-native-core-dispatch-' if a.native_core_dispatch else 'atari-sio-boot-'
+        evidence_kind = ('atari-sio-native-wrong-r-retention-' if a.native_wrong_r_retention else
+                         'atari-sio-native-core-dispatch-' if a.native_core_dispatch else 'atari-sio-boot-')
         evidence_dir = ROOT / 'test-evidence' / (evidence_kind + time.strftime('%Y%m%d-%H%M%S'))
     if evidence_dir:
         evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -621,12 +692,27 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
+    if a.native_core_dispatch and a.native_wrong_r_retention:
+        raise ValueError('choose only one native projection')
     if a.native_core_dispatch:
         try:
             result = run_netsio_native_core_dispatch(a.timeout, evidence_dir)
             result['virtual_projection_result'] = write_netsio_native_core_dispatch_projection(result)
             if result['virtual_projection_result']['status'] != 'pass':
                 raise RuntimeError(f"native-core-dispatch evidence is {result['virtual_projection_result']['status']}")
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_wrong_r_retention:
+        try:
+            result = run_netsio_native_wrong_r_retention(a.timeout, evidence_dir)
+            result['virtual_projection_result'] = write_netsio_native_wrong_r_retention_projection(result)
+            if result['virtual_projection_result']['status'] != 'pass':
+                raise RuntimeError(f"native-wrong-r-retention evidence is {result['virtual_projection_result']['status']}")
             result['outcome'] = 'launch'
         except Exception as exc:
             result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
