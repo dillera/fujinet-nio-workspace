@@ -19,6 +19,26 @@ AUX and serial bytes, not the Atari DCB count. The matrix uses symbolic control
 bytes (`A`, `C`, `N`, and `E`) and literal packet/state byte strings, rather
 than claiming physical timing or device implementation details.
 
+`fixtures/nio_v1.virtual.manifest.json` is the reference-only virtual
+projection. It contains stable fixture IDs, ordered operations, and required
+observation categories for each native family, plus the existing D1 page-6
+boot references. It does not repeat wire bytes, generate responses, or permit
+legacy `$71`, SLIP, padded-read, or stream evidence. Client-only malformed-peer
+or timeout observations remain explicit instead of being manufactured by the
+synchronous production endpoint.
+
+`virtual_projection.py` supplies the shared machine-readable result schema for
+`netsio` and `altirra-embedded`. A result always names one adapter and one
+scenario, records observed SIO commands/responses and evidence paths, and is
+`incomplete` if required evidence is absent. The boot gate can write its D1
+result through that schema without becoming a second emulator runner:
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --trace-serial --capture-dcb --explicit-cold-reset \
+  --write-projection-results
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

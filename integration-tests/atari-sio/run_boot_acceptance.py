@@ -4,6 +4,10 @@ from __future__ import annotations
 import argparse, hashlib, json, os, re, shutil, signal, subprocess, sys, tempfile, time
 from pathlib import Path
 
+from virtual_projection import (evidence_paths_for_boot, load_manifest,
+                                scenario_result, validate_manifest,
+                                write_scenario_result)
+
 ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
 TRACE_FIXTURE = ROOT / "integration-tests/atari-sio/fixtures/boot_acceptance_trace.json"
@@ -448,8 +452,30 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         cleanup_temps(temps) if 'temps' in locals() else None
         stop(ps)
 
+def write_netsio_boot_projection(run_result):
+    """Write adapter-scoped virtual evidence from the existing boot lifecycle.
+
+    This is intentionally only the stable D1/page-6 projection.  Native Q/W/P/R
+    playback is a later increment; this helper supplies its shared result and
+    evidence contract without manufacturing an emulator-side peer.
+    """
+    manifest = validate_manifest(load_manifest())
+    boot = next(item for item in manifest["boot_projections"] if item["id"] == "boot-page6-config")
+    run = Path(run_result["run_dir"])
+    trace = run_result["trace"]
+    observed = {
+        "sio_commands": [trace["d1_status"], *trace["boot_reads_128"], trace["first_dd_read_256"]],
+        "sio_responses": ["A", "C"],
+        "page_6_signature": run_result["signature"],
+        "fixture_scenario_ids": boot["scenario_ids"],
+    }
+    result = scenario_result("netsio", boot["id"], observed, evidence_paths_for_boot(run, "netsio"))
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
@@ -459,6 +485,10 @@ if __name__=='__main__':
         evidence_dir.mkdir(parents=True, exist_ok=True)
     if a.repeat < 1:
         raise ValueError('--repeat must be positive')
+    if a.write_projection_results and not a.trace_serial:
+        raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
+    if a.write_projection_results and a.backend != 'nio':
+        raise ValueError('--write-projection-results only records the production netsio adapter')
     if a.observe_native:
         emit({'native': run_native(a.timeout, evidence_dir, observe=True)})
     elif a.native_only:
@@ -472,6 +502,11 @@ if __name__=='__main__':
             try:
                 result['native'] = run_native(a.timeout, run_dir)
                 result['netsio'] = run_netsio(a.timeout, run_dir, a.settle, a.capture_dcb, a.command_ack_delay_tics, a.trace_serial, a.backend, a.explicit_cold_reset)
+                if a.write_projection_results:
+                    projection_result = write_netsio_boot_projection(result['netsio'])
+                    result['virtual_projection_results'] = [projection_result]
+                    if projection_result['status'] != 'pass':
+                        raise RuntimeError(f"virtual projection evidence is {projection_result['status']}: {projection_result['missing_evidence']}")
                 result['outcome'] = 'launch'
             except Exception as exc:
                 # The sidecars own their logs and run_netsio writes its

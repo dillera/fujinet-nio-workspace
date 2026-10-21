@@ -317,6 +317,42 @@ cmake --build build/linux-debug --target AltirraSDL -j2
 The cross-adapter projection runner and Story 2.3 completion remain
 intentionally outstanding.
 
+## Implementation status: virtual projection infrastructure
+
+`integration-tests/atari-sio/fixtures/nio_v1.virtual.manifest.json` now
+projects the independent native fixture IDs into ordered Q/W/P/R, rejection,
+wrong-R, reset, recovery, capacity, and existing D1/page-6 boot groups. It is
+reference-only: no packet literals are copied and client-only malformed-peer
+or timeout observations are labelled rather than manufactured by the
+synchronous endpoint. The stdlib validator rejects unknown or duplicate IDs,
+missing observations, and any incomplete legacy-path exclusion.
+
+`virtual_projection.py` is the shared result/evidence layer. Results are
+adapter-scoped (`netsio` or `altirra-embedded`) and require the appropriate
+logs, POKEY capture, screenshot, and inspection before a pass is possible.
+The existing boot runner now optionally writes `boot-page6-config` through
+that layer when invoked with `--write-projection-results`; its lifecycle and
+diagnostics remain unchanged. Focused tests deliberately reverse an expected
+operation order and corrupt manifest references/observations, confirming the
+comparison or validator fails before restoring the canonical values.
+
+Executed evidence for this increment:
+
+```sh
+source "$NIO_WORKSPACE/scripts/env.sh"
+python3 -m unittest discover -s integration-tests/atari-sio/tests -v
+# 24 passed
+
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --trace-serial --capture-dcb --explicit-cold-reset \
+  --write-projection-results
+# page-6 native + production-NetSIO boot passed; adapter=netsio,
+# scenario_id=boot-page6-config, status=pass
+```
+
+Full native operation playback through each virtual adapter remains the next
+Story 2.3 increment; Story 2.3 is not complete.
+
 ## Out of scope
 
 Public `fn_*` Clock/File/Network/Disk guest-XEX acceptance, CIO `N:`/BASIC
