@@ -1,0 +1,13 @@
+{
+  "wire_revision": 1,
+  "address": 127,
+  "capacity": 512,
+  "scenarios": [
+    {"id":"q-idle","command":"Q","aux":0,"dcb_count":4,"reply":["A","C","01 00 02 00"],"state":"idle"},
+    {"id":"w-idle","command":"W","aux":4,"dcb_count":4,"payload":"fc 01 04 ff","reply":["A","C"],"state":"pending"},
+    {"id":"p-pending","command":"P","aux":0,"dcb_count":3,"reply":["A","C","01 00 00"],"state":"pending"},
+    {"id":"p-ready","command":"P","aux":0,"dcb_count":3,"reply":["A","C","02 04 00"],"state":"ready"},
+    {"id":"r-ready","command":"R","aux":4,"dcb_count":4,"payload":"fc 01 04 ff","reply":["A","C"],"state":"idle"},
+    {"id":"r-wrong-length-retains","command":"R","aux":3,"dcb_count":3,"reply":["N"],"state":"ready"}
+  ]
+}
