@@ -4,7 +4,7 @@ feature: 'atari-nio-physical-sio'
 story: '2.2'
 type: 'feature'
 created: '2026-10-21'
-status: 'draft'
+status: 'done'
 baseline_workspace_commit: '8d0ce005'
 baseline_library_commit: 'b7fc675c'
 context:
@@ -52,42 +52,27 @@ particular:
   NIO response. A real device restart constructs the endpoint idle; that is
   the reset that releases an outstanding request.
 
-## Current production seam
+## Implemented production design
 
-Story 1.2 already has the required ingress boundary:
-`AtariSioIngress` owns the one `UartChannel`, records CMD edges, routes
-`D1:`--`D8:` to its disk frontend, and reserves `0x7F`. Its current
-`NativeHandler` receives only a five-byte command frame, so it cannot validate
-or receive a `W` data frame, retain a response, or emit `Q`/`P`/`R` replies.
-`main_esp32.cpp` constructs the ingress after `DiskDevice` registration, so
-`core.routingManager()` is available at the attachment point.
+### 1. Portable native endpoint attached to the existing ingress
 
-The older `AtariSioFujiBusChannel`/`AtariSioFujiBusFramer` is not selected by
-the current `FN_BUILD_ATARI_FUJIBUS_SIO` profile, but is still compiled under
-that macro. It implements the obsolete two-command, padded, SLIP composition
-and therefore cannot be retained as a native-v1 implementation or test oracle.
-
-## Implementation design
-
-### 1. Add one portable native endpoint and attach it to the existing ingress
-
-Add a host-testable `AtariSioNioFrontend` under `include/fujinet/io/` and
-`src/lib/`. It accepts a five-byte SIO command frame and, only for an accepted
+`AtariSioNioFrontend` is a host-testable endpoint under `include/fujinet/io/`
+and `src/lib/`. It accepts a five-byte SIO command frame and, only for an accepted
 `W`, the exact AUX-sized data frame plus its SIO checksum. Its result mirrors
 the existing disk frontend: reply bytes and an optional expected incoming-data
-length. `AtariSioIngress` changes its one pending-write discriminator from
+length. `AtariSioIngress` extends its pending-write discriminator from
 disk-only state to `{none, disk, nio}` and delegates `0x7F` command/data work
 to this object. No second UART, `Channel`, `ITransport`, task, or ingress is
 introduced.
 
-Construct the frontend with `io::IRequestHandler&`; production passes
+The frontend is constructed with `io::IRequestHandler&`; production passes
 `core.routingManager()` when constructing the existing ingress. On one valid
 raw FujiBus `W` packet, the frontend uses the existing raw packet mapping to
 create one `IORequest`, invokes that handler once, maps the returned
-`IOResponse` back to one raw FujiBus response, and queues it. Refactor the
-small raw-packet-to-`IORequest`/`IOResponse` mapping currently embedded in
-`FujiBusTransport` into a shared packet-codec helper used by both callers;
-this is a codec extraction, not a service or transport implementation.
+`IOResponse` back to one raw FujiBus response, and queues it. The former
+small raw-packet-to-`IORequest`/`IOResponse` mapping in `FujiBusTransport` is
+now the shared packet-codec helper used by both callers; this is a codec
+extraction, not a service or transport implementation.
 
 The frontend owns exactly one response slot and has explicit idle,
 receiving/pending, and ready state. Synchronous core handlers will normally
@@ -95,9 +80,10 @@ make the slot ready before the first poll; the state model still forbids a
 second request while it is receiving, pending, or ready. Do not add an async
 service scheduler merely to manufacture a pending interval.
 
-### 2. Implement the native-v1 transaction rules exactly
+### 2. Native-v1 transaction rules
 
-Use the literal command/reply/checksum conventions in `nio_v1.json`:
+The endpoint implements the literal command/reply/checksum conventions in
+`nio_v1.json`:
 
 | Command | Idle/valid behavior | Rejection and retention behavior |
 | --- | --- | --- |
@@ -106,21 +92,20 @@ Use the literal command/reply/checksum conventions in `nio_v1.json`:
 | `P` | AUX zero only; return `A,C`, exactly `{state,length-lo,length-hi}` plus its SIO checksum. Idle/pending length is zero; ready length is the queued raw-response size. | Bad frame or nonzero AUX returns `N` and changes no slot. |
 | `R` | Ready only; AUX must equal the queued response size. Emit `A,C`, exactly that raw response, and its SIO checksum. Consume the slot when this valid terminal command is accepted, before transmitting data. | Wrong AUX, non-ready state, or bad command frame returns `N` and retains the queued response. |
 
-The endpoint must reject any generated core response larger than 512 without
+The endpoint rejects any generated core response larger than 512 without
 padding or truncating it. It must instead queue a bounded, normal FujiBus
 error response using the established `IOResponse` status convention; a valid
 `W` never becomes an SIO `NAK` merely because service processing failed. This
 keeps `NAK` exclusively for malformed/rejected transport transactions.
 
-### 3. Retire the native-profile obsolete path
+### 3. Retired native-profile obsolete path
 
-Remove the unselected ESP32 `AtariSioFujiBusChannel`, its padded/SLIP
+The unselected ESP32 `AtariSioFujiBusChannel`, its padded/SLIP
 `AtariSioFujiBusFramer`, and their composition regression from the native
-firmware source/test lists; update only hand-maintained textual architecture
-and profile documentation that still describes this obsolete path. Do not
-edit generated UML/SVG artifacts. Keep the separate legacy profile family
-unchanged, but ensure it is neither selected by `FN_BUILD_ATARI_FUJIBUS_SIO`
-nor counted by native-v1 tests.
+firmware source/test lists are removed. Hand-maintained textual architecture
+and profile documentation are updated; generated UML/SVG artifacts are not
+edited. The separate legacy profile family remains unchanged and is neither
+selected by `FN_BUILD_ATARI_FUJIBUS_SIO` nor counted by native-v1 tests.
 
 ## Executable conformance seam
 
@@ -131,7 +116,7 @@ a real `FujinetCore::routingManager()` and a test-only registered
 firmware endpoint or emulator peer. It also lets host tests feed literal SIO
 command/data frames and inspect every emitted byte.
 
-Add `tests/test_atari_sio_nio_frontend.cpp`, loading
+`tests/test_atari_sio_nio_frontend.cpp` loads
 `integration-tests/atari-sio/fixtures/nio_v1.json` as the envelope oracle in
 the same manner as the completed disk frontend test. It must assert scenario
 IDs and literal `A`/`C`/`N`, AUX-derived exact payloads, and independently
@@ -151,11 +136,11 @@ calculated SIO checksums. It must cover:
   frontend is only attached after `AtariSioIngress` has selected `0x7F`, so it
   cannot consume a disk frame.
 
-The test must explicitly document that fixture `dcb_count` fields are
-client-side assertions, not inputs to or validation by the firmware endpoint.
-Run it in the existing POSIX CTest binary. Build the Atari ESP32 profile after
-wiring the endpoint; virtual NetSIO/Altirra and guest-XEX execution are
-deliberately not added here.
+The test explicitly documents that fixture `dcb_count` fields are client-side
+assertions, not inputs to or validation by the firmware endpoint. It runs in
+the existing POSIX CTest binary. The Atari ESP32 profile is built after wiring
+the endpoint; virtual NetSIO/Altirra and guest-XEX execution are deliberately
+not added here.
 
 ## Acceptance checklist
 
@@ -193,18 +178,43 @@ ctest --test-dir build/fujibus-pty-debug -R 'fujinet-nio-tests' --output-on-fail
 The CTest evidence proves the portable endpoint/core-dispatch contract, not
 UART timing, real hardware, NetSIO, AltirraSDL, or public guest-XEX behavior.
 
-## Review question
+## Completion audit and executable evidence
 
-`nio_v1.json` is sufficient as the literal SIO-envelope authority, but its
-current four-byte `w-idle`/`r-ready` payload is intentionally a transport
-vector, not a parseable raw FujiBus packet (`FujiBusPacket::fromRaw()` rejects
-it). To prove the required real core dispatch without making a production
-serializer the oracle, Story 2.2 needs one additional literal, parseable
-raw-request/raw-response fixture scenario (or explicit companion fields on
-the existing W/R scenario) with independently checked FujiBus bytes. This is
-fixture evidence only and does not alter the approved SIO protocol. Approval
-is requested for that smallest fixture extension; no other design decision is
-blocked.
+The implementation is complete for this story's independently testable
+firmware scope.
+
+| Acceptance criterion | Production implementation | Executed evidence |
+| --- | --- | --- |
+| One complete `W` dispatches once and one slot blocks later `W` until `R` or reset. | `AtariSioNioFrontend` owns `Idle`/`Receiving`/`Ready`, decodes through `fujibus_packet_codec`, and invokes the injected `RoutingManager` once only after a valid data checksum and raw packet. | `test_atari_sio_nio_frontend.cpp` uses a real `FujinetCore` plus a recording `VirtualDevice`; it proves the literal `core-dispatch` pair, one request, busy-W rejection, terminal consumption, reset, and a full 512-byte exchange. |
+| `Q`/`W`/`P`/`R` use the native-v1 control bytes, AUX, exact lengths, and SIO checksums. | `AtariSioNioFrontend::begin()` and `complete_write()` validate command/data checksums, AUX, state, and the 512-byte bound; response data is emitted as `A,C,payload,checksum`. Firmware intentionally has no DCB-count input. | The independent fixture validator checks all `nio_v1.json` literals. Focused endpoint tests load the literal envelope frames and explicitly document that DCB counts are client-side-only. |
+| Rejection and recovery preserve or consume state correctly. | Invalid command/data/raw packet, zero/oversize W, busy W, wrong R AUX, and non-idle Q return `N` without dispatching or losing a ready response. A valid R copies reply bytes before consuming its slot; `abort_write()` only cancels an incomplete W; `reset()` clears the slot. Oversize service output is converted to a bounded normal FujiBus error response. | Endpoint and ingress-router tests cover malformed/truncated W, wrong-R retention, terminal-R lifetime, CMD-edge preservation of ready data, reset, oversize response handling, and subsequent valid W. |
+| Single ingress and disk ownership remain intact. | `AtariSioIngressRouter` is the sole byte collector with `{none,disk,nio}` pending-write state; ESP32 `AtariSioIngress` remains the only CMD/UART/GPIO owner. `main_esp32.cpp` constructs it with `disk_service()` and `core.routingManager()` after disk registration. | `test_atari_sio_ingress_router.cpp` verifies D1 and D8 reads stay in `AtariSioDiskFrontend`/`DiskService`, while `$7F` reaches the real core route and malformed data does not dispatch. |
+| Reply bytes remain valid across terminal consumption and transmission. | Terminal R returns an owning `Result::bytes` copy before clearing the frontend slot. ESP32 `UartChannel::write()` now retries partial ESP-IDF enqueues until its supplied buffer is fully queued, then ingress flushes it. | The terminal-R test retains and verifies its result after a subsequent idle poll; the focused full-512-byte test verifies one complete response payload plus checksum. The ESP32 native-profile build compiles the UART retry path. |
+| The old native padded SLIP path cannot count as v1. | `AtariSioFujiBusChannel`/`AtariSioFujiBusFramer` and their composition test are deleted; both POSIX and ESP source lists omit them. The native profile is `TransportKind::None` + `SioGpio` and uses ingress only. | `test_atari_nio_profile_has_no_legacy_padded_slip_sio_adapter` checks obsolete paths and source-list references are absent and rejects `FujiBusSlip` in the native branch. |
+
+Verification run after the final audit changes:
+
+```sh
+source /home/markf/dev/nio/fujinet-nio-workspace/scripts/env.sh
+python3 -m unittest discover -s integration-tests/atari-sio/tests -v
+# 19 tests passed
+
+cd repos/fujinet-nio
+./build.sh -cp fujibus-pty-debug
+build/fujibus-pty-debug/tests/fujinet-nio-tests \
+  --test-case="Atari native NIO frontend*,Atari SIO ingress router*" --no-skip
+# 7 cases, 184 assertions passed
+ctest --test-dir build/fujibus-pty-debug --output-on-failure
+# 3/3 passed
+python3 -m unittest discover -s py/tests -p 'test_platformio_board_config.py' -v
+# 8 tests passed, including the no-legacy-adapter profile assertion
+./build.sh -b
+# atari-nio-fujibus-sio-gpio-fujinet-v1-16mb passed
+```
+
+This evidence does not claim NetSIO/Altirra interoperability, guest-XEX
+execution, or physical SIO timing/electrical proof. Those remain explicitly
+deferred to Stories 2.3/2.4 and Epic 3.
 
 ## Out of scope
 
