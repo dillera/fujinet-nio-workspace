@@ -57,6 +57,25 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --native-core-dispatch --timeout 20
 ```
 
+The matching embedded projection uses the same XEX, inspection, screenshot,
+and POKEY evidence lifecycle, but removes the NetSIO custom device and starts
+AltirraSDL's `fujinetnio` device directly.  Its explicit
+`projectionfixture=true` setting only registers the deterministic downstream
+`VirtualDevice` used by the literal core-dispatch packet; native Q/W/P/R still
+travels through the production `AtariSioNioFrontend` and the embedded
+`FujinetCore::routingManager()`.  The result is independently recorded as
+`altirra-embedded` and compares every captured POKEY command, data, control,
+payload, and checksum byte with `nio_v1.json`.
+
+```sh
+source "$NIO_WORKSPACE/scripts/env.sh"
+cmake --build repos/AltirraSDL/build/linux-debug \
+  --target AltirraSDL altirra-fujinet-nio-sio-test
+make -C integration-tests/atari-sio/native-projection-app all
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-core-dispatch-altirra-embedded --timeout 30
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

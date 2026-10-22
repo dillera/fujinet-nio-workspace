@@ -122,6 +122,51 @@ class VirtualProjectionTests(unittest.TestCase):
             projection.compare_netsio_native_core_dispatch(
                 log.replace("\nudp: Sending 10 bytes: 02 01 02 09 00 0D 01 00 AA 55", ""), self.manifest)
 
+    def test_altirra_embedded_core_dispatch_requires_exact_pokey_wire_bytes(self):
+        def pokey(direction, value):
+            if direction == "Receive":
+                return f"[SIODATA] [  0] Receive      < ${value:02X}"
+            return f"[SIODATA] [  0] {direction:<8} ${value:02X} >"
+
+        lines = []
+        frames = (
+            bytes.fromhex("7f 51 00 00 d0"), bytes.fromhex("7f 57 06 00 dc"),
+            bytes.fromhex("7f 50 00 00 cf"), bytes.fromhex("7f 52 09 00 da"),
+            bytes.fromhex("7f 50 00 00 cf"),
+        )
+        replies = (
+            b"AC\x01\x00\x02\x00\x03", b"AAC", b"AC\x02\x09\x00\x0b",
+            bytes.fromhex("41 43 01 02 09 00 0d 01 00 aa 55 1a"),
+            b"AC\x00\x00\x00\x00",
+        )
+        for index, (frame, reply) in enumerate(zip(frames, replies)):
+            lines.extend(pokey("SendCmd", value) for value in frame)
+            if index == 1:
+                lines.extend(pokey("Send", value) for value in bytes.fromhex("01 02 06 00 09 00 12"))
+            lines.extend(pokey("Receive", value) for value in reply)
+        trace = "\n".join(lines) + "\n"
+        core_log = "[fujinetnio-projection] core dispatch fixture route invocation 1\n"
+        observed = projection.compare_altirra_embedded_native_core_dispatch(
+            trace, core_log, self.manifest)
+        self.assertEqual([entry["fixture"] for entry in observed], [
+            "q-idle", "w-core-dispatch", "p-core-dispatch-ready",
+            "r-core-dispatch", "reset-clears",
+        ])
+        self.assertEqual(observed[3]["response"], {
+            "controls": ["A", "C"],
+            "payload": "01 02 09 00 0d 01 00 aa 55",
+            "checksum": "1a",
+        })
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_core_dispatch(
+                trace.replace("Receive      < $AA", "Receive      < $AB", 1),
+                core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_core_dispatch(
+                boot_runner._swap_embedded_terminal_r_response(trace), core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_core_dispatch(trace, "", self.manifest)
+
     def test_netsio_wrong_r_retention_requires_nak_then_unchanged_response(self):
         log = "\n".join((
             "core-dispatch fixture route invocation 1",

@@ -495,6 +495,100 @@ def compare_netsio_native_capacity_bounds(log, manifest=None, fixture_data=None)
     return compare_netsio_native_projection(log, "native-capacity-bounds", manifest, fixture_data)
 
 
+_POKEY_SIODATA = re.compile(
+    r"\[SIODATA\].*?\b(?P<direction>SendCmd|Send|Receive)\s+(?:<\s+)?\$(?P<byte>[0-9A-F]{2})",
+    re.MULTILINE)
+
+
+def _embedded_sio_events(log):
+    """Read literal serial bytes emitted by Altirra's real POKEY SIO path."""
+    events = [(match.group("direction"), int(match.group("byte"), 16), match.start())
+              for match in _POKEY_SIODATA.finditer(log)]
+    if not events:
+        raise ProjectionMismatch("Altirra embedded projection has no POKEY SIODATA evidence")
+    return events
+
+
+def compare_altirra_embedded_native_core_dispatch(pokey_log, altirra_log,
+                                                   manifest=None, fixture_data=None):
+    """Byte-verify native-core-dispatch through Altirra's embedded SIO device.
+
+    The input is captured POKEY traffic, not a reconstructed protocol trace.
+    The endpoint's deterministic downstream device is allowed to log only its
+    real RoutingManager invocation; all command and reply bytes are compared
+    to the independent literal fixture.
+    """
+    manifest = load_manifest() if manifest is None else manifest
+    fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
+    fixtures = {item["id"]: item for item in fixture_data["scenarios"]}
+    ids = native_core_dispatch_fixture_ids(manifest)
+    dispatches = [int(value) for value in re.findall(
+        r"core dispatch fixture route invocation (\d+)", altirra_log)]
+    if dispatches != [1]:
+        raise ProjectionMismatch(
+            "native-core-dispatch: expected exactly one embedded real-core dispatch, "
+            f"observed {dispatches}")
+
+    events = _embedded_sio_events(pokey_log)
+    command_events = [(byte, position) for direction, byte, position in events
+                      if direction == "SendCmd"]
+    native_starts = [index for index, (byte, _) in enumerate(command_events)
+                     if byte == 0x7f]
+    if len(native_starts) != len(ids):
+        raise ProjectionMismatch(
+            f"native-core-dispatch: expected {len(ids)} native command frames, "
+            f"found {len(native_starts)}")
+
+    command_positions = []
+    for identifier, start in zip(ids, native_starts):
+        frame = bytes(byte for byte, _ in command_events[start:start + 5])
+        if len(frame) != 5 or frame != _hex(fixtures[identifier]["frame"]):
+            raise ProjectionMismatch(
+                f"{identifier}: POKEY command frame differs from literal fixture")
+        command_positions.append(command_events[start][1])
+
+    observed = []
+    for ordinal, (identifier, command_position) in enumerate(zip(ids, command_positions)):
+        next_position = (command_positions[ordinal + 1]
+                         if ordinal + 1 < len(command_positions) else float("inf"))
+        window = [(direction, byte) for direction, byte, position in events
+                  if command_position < position < next_position]
+        fixture = fixtures[identifier]
+        command = fixture["command"]
+        controls, payload, payload_checksum = _fixture_reply(fixture, command)
+        response = [byte for direction, byte in window if direction == "Receive"]
+        # The fixture's W ACK accepts its command frame.  Real SIO also has a
+        # distinct data-frame ACK before terminal COMPLETE; it must follow
+        # Altirra's post-data timing guard and is captured separately here.
+        physical_controls = ([ord("A")] if command == "W" else []) + controls
+        expected_response = bytes(physical_controls) + payload + (
+            bytes((payload_checksum,)) if payload_checksum is not None else b"")
+        if bytes(response) != expected_response:
+            raise ProjectionMismatch(
+                f"{identifier}: POKEY response bytes differ from literal fixture")
+        entry = {"fixture": identifier, "command": fixture["frame"]}
+        if command == "W":
+            sent = bytes(byte for direction, byte in window if direction == "Send")
+            expected_data = fixture_payload(fixture)
+            expected_checksum = int(fixture["payload_checksum"], 16)
+            if sent != expected_data + bytes((expected_checksum,)):
+                raise ProjectionMismatch(
+                    f"{identifier}: POKEY W data/checksum differs from literal fixture")
+            entry["data"] = expected_data.hex(" ")
+            entry["checksum"] = f"{expected_checksum:02x}"
+        entry["response"] = {
+            "controls": [chr(value) for value in physical_controls],
+            "payload": payload.hex(" "),
+            "checksum": None if payload_checksum is None else f"{payload_checksum:02x}",
+        }
+        observed.append(entry)
+
+    projection = next(item for item in manifest["projections"]
+                      if item["id"] == "native-core-dispatch")
+    compare_observed_operations(projection, [entry["fixture"] for entry in observed[1:-1]])
+    return observed
+
+
 def evidence_paths_for_boot(run_dir: Path, adapter: str):
     run_dir = Path(run_dir)
     paths = {
