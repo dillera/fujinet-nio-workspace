@@ -145,10 +145,18 @@ def native_projection_fixture_ids(projection_id, manifest=None):
         "native-reset-to-idle": ["w-core-dispatch", "p-core-dispatch-ready",
                                   "reset-clears", "w-core-dispatch-after-reset",
                                   "p-core-dispatch-ready", "r-core-dispatch-after-reset"],
+        "native-interrupted-r-recovery": [
+            "w-core-dispatch", "p-core-dispatch-ready",
+            "r-core-dispatch-interrupted-consumes", "p-idle-after-consumed-r",
+            "w-core-dispatch-after-interrupted-r", "p-core-dispatch-ready",
+            "r-core-dispatch-after-interrupted-r"],
     }
     if projection_id not in approved or ids != approved[projection_id]:
         raise ProjectionError(f"{projection_id}: projection no longer names the approved literal sequence")
-    return ["q-idle", *ids, "reset-clears"]
+    terminal_idle = ("p-idle-after-consumed-r"
+                     if projection_id == "native-interrupted-r-recovery"
+                     else "reset-clears")
+    return ["q-idle", *ids, terminal_idle]
 
 
 def native_core_dispatch_fixture_ids(manifest=None):
@@ -242,7 +250,7 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
     """
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
-    dispatches = 2 if projection_id == "native-reset-to-idle" else 1
+    dispatches = 2 if projection_id in {"native-reset-to-idle", "native-interrupted-r-recovery"} else 1
     observed_dispatches = [int(value) for value in re.findall(
         r"core-dispatch fixture route invocation (\d+)", log)]
     if observed_dispatches != list(range(1, dispatches + 1)):
@@ -274,6 +282,23 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
                 attempts += 1
             if attempts == 0:
                 raise ProjectionMismatch("r-wrong-length-retains: SIOV did not issue the wrong-length R")
+            continue
+        if identifier == "r-core-dispatch-interrupted-consumes":
+            if position_index >= len(command_positions):
+                raise ProjectionMismatch("interrupted terminal R is missing")
+            if events[command_positions[position_index]][1][1:6] != expected_command:
+                raise ProjectionMismatch("interrupted terminal R has an unexpected command frame")
+            expanded_ids.append(identifier)
+            position_index += 1
+            # A checksum fault can make Atari OS retry the same SIOV request.
+            # Those physical retries are not new logical R operations: after
+            # the accepted first R they must observe consumed-slot NAKs.
+            while position_index < len(command_positions):
+                observed_command = events[command_positions[position_index]][1][1:6]
+                if observed_command != expected_command:
+                    break
+                expanded_ids.append("r-core-dispatch-consumed-nak")
+                position_index += 1
             continue
         if position_index >= len(command_positions):
             raise ProjectionMismatch(f"{identifier}: missing native command frame")
@@ -371,6 +396,17 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
                 entry["siov_attempts"] = 1
             observed.append(entry)
 
+    collapsed = []
+    for entry in observed:
+        if (entry["fixture"] == "r-core-dispatch-consumed-nak" and collapsed and
+                collapsed[-1]["fixture"] == "r-core-dispatch-interrupted-consumes"):
+            collapsed[-1]["siov_attempts"] = collapsed[-1].get("siov_attempts", 1) + 1
+        else:
+            if entry["fixture"] == "r-core-dispatch-interrupted-consumes":
+                entry["siov_attempts"] = 1
+            collapsed.append(entry)
+    observed = collapsed
+
     projection = next(item for item in manifest["projections"] if item["id"] == projection_id)
     compare_observed_operations(projection, [entry["fixture"] for entry in observed[1:-1]])
     return observed
@@ -389,6 +425,11 @@ def compare_netsio_native_wrong_r_retention(log, manifest=None, fixture_data=Non
 def compare_netsio_native_reset_to_idle(log, manifest=None, fixture_data=None):
     """Byte-verify the real NetSIO reset while a native response is queued."""
     return compare_netsio_native_projection(log, "native-reset-to-idle", manifest, fixture_data)
+
+
+def compare_netsio_native_interrupted_r_recovery(log, manifest=None, fixture_data=None):
+    """Verify an accepted terminal R that was consumed before guest failure."""
+    return compare_netsio_native_projection(log, "native-interrupted-r-recovery", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):

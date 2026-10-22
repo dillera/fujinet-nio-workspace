@@ -106,7 +106,8 @@ class NioV1FixtureTest(unittest.TestCase):
     def test_core_dispatch_pair_is_literal_raw_fujibus(self):
         scenarios = {s["id"]: s for s in DATA["scenarios"]}
         pairs = {p["id"]: p for p in DATA["packet_pairs"]}
-        self.assertEqual(set(pairs), {"core-dispatch", "core-dispatch-after-reset"})
+        self.assertEqual(set(pairs), {"core-dispatch", "core-dispatch-after-reset",
+                                      "core-dispatch-after-interrupted-r"})
         for pair in pairs.values():
             request = scenarios[pair["request_scenario"]]
             response = scenarios[pair["response_scenario"]]

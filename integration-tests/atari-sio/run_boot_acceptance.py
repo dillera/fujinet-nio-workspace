@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Deterministic Story 1.3 native and production-NetSIO boot gate."""
 from __future__ import annotations
-import argparse, hashlib, json, os, re, shutil, signal, socket, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, re, select, shutil, signal, socket, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 
 from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_netsio_native_core_dispatch,
                                 compare_netsio_native_wrong_r_retention,
                                 compare_netsio_native_reset_to_idle,
+                                compare_netsio_native_interrupted_r_recovery,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
 
@@ -16,6 +17,7 @@ ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
+NATIVE_INTERRUPTED_R_RECOVERY_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-interrupted-r-recovery.xex"
 TRACE_FIXTURE = ROOT / "integration-tests/atari-sio/fixtures/boot_acceptance_trace.json"
 PROFILE = ROOT / "configs/atari/profiles/atari-nio-config-boot.yaml"
 ALTIRRA = ROOT / "repos/AltirraSDL/build/linux-debug/src/AltirraSDL/AltirraSDL"
@@ -146,6 +148,98 @@ def inject_netsio_device_reset(token, hub_log, nio_log, run_dir, timeout=10):
             return event
         time.sleep(.05)
     raise RuntimeError('injected NetSIO COLD_RESET was not observed by production ingress')
+
+
+class NetSioTerminalRChecksumRelay:
+    """Transparent NetSIO carrier relay with one deliberate delivery fault.
+
+    It forwards the live endpoint's complete UDP traffic to the ordinary hub.
+    Only after the first correct-length native R is forwarded to the endpoint
+    does it alter that response's final data checksum on its way to Altirra.
+    Thus the frontend has already accepted and consumed R; the relay is not a
+    Q/W/P/R peer and never fabricates any endpoint response.
+    """
+    def __init__(self, run_dir, listen_port=9997, hub_port=9998):
+        self.run_dir = Path(run_dir)
+        self.hub = ('127.0.0.1', hub_port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('127.0.0.1', listen_port))
+        self.sock.setblocking(False)
+        self.endpoint = None
+        self.stop_requested = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='netsio-r-checksum-relay', daemon=True)
+        self.interrupted_r_attempts = 0
+        self.post_failure_w_seen = False
+        self.armed = False
+        self.payload_seen = False
+        self.fault_applied = False
+        self.failure = None
+        self.events = []
+
+    def _record(self, event, **details):
+        self.events.append({'event': event, **details})
+
+    def start(self):
+        self.thread.start()
+
+    def _run(self):
+        try:
+            while not self.stop_requested.is_set():
+                readable, _, _ = select.select((self.sock,), (), (), .05)
+                if not readable:
+                    continue
+                data, source = self.sock.recvfrom(1024)
+                if source[1] == self.hub[1]:
+                    if self.fault_applied and len(data) >= 6 and data[0] == 0x02 and data[1:3] == b'\x7fW':
+                        self.post_failure_w_seen = True
+                    if len(data) >= 6 and data[0] == 0x02 and data[1:6] == bytes.fromhex('7f 52 09 00 da'):
+                        if not self.post_failure_w_seen:
+                            self.interrupted_r_attempts += 1
+                        if self.interrupted_r_attempts == 1:
+                            self.armed = True
+                            self.payload_seen = False
+                            self._record('first-terminal-r-forwarded', frame=data[1:6].hex(' '))
+                        elif not self.post_failure_w_seen:
+                            self._record('terminal-r-retry-forwarded', frame=data[1:6].hex(' '))
+                        else:
+                            self._record('recovery-terminal-r-forwarded', frame=data[1:6].hex(' '))
+                    if self.endpoint is not None:
+                        self.sock.sendto(data, self.endpoint)
+                    continue
+
+                if self.endpoint is None:
+                    self.endpoint = source
+                    self._record('endpoint-registered', endpoint=f'{source[0]}:{source[1]}')
+                if source != self.endpoint:
+                    self._record('unexpected-source', endpoint=f'{source[0]}:{source[1]}')
+                    continue
+                outgoing = data
+                if self.armed and data and data[0] == 0x02:
+                    self.payload_seen = True
+                elif self.armed and self.payload_seen and len(data) == 2 and data[0] == 0x01:
+                    outgoing = bytes((0x01, data[1] ^ 0x01))
+                    self.armed = False
+                    self.fault_applied = True
+                    self._record('terminal-r-checksum-corrupted', original=f'{data[1]:02x}',
+                                 delivered=f'{outgoing[1]:02x}')
+                self.sock.sendto(outgoing, self.hub)
+        except Exception as exc:  # recorded and surfaced by the caller.
+            self.failure = str(exc)
+
+    def stop(self):
+        self.stop_requested.set()
+        self.thread.join(2)
+        self.sock.close()
+        summary = {
+            'format': 'atari-netsio-terminal-r-checksum-relay-v1',
+            'interrupted_r_attempts': self.interrupted_r_attempts,
+            'fault_applied': self.fault_applied,
+            'failure': self.failure,
+            'events': self.events,
+        }
+        path = self.run_dir / 'netsio-terminal-r-relay.json'
+        path.write_text(json.dumps(summary, indent=2) + '\n')
+        return summary, path
 
 def inspect_launch(token, evidence_dir=None):
     sys.path[:0]=[str(SDK)]
@@ -530,7 +624,8 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         cleanup_temps(temps) if 'temps' in locals() else None
         stop(ps)
 
-def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention=False, reset_to_idle=False):
+def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention=False, reset_to_idle=False,
+                                 interrupted_r_recovery=False):
     """Wait for the real guest XEX and capture its independently checked data."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -562,6 +657,15 @@ def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention
                         'post_reset_terminal_idle': bridge.peek(PROJECTION_AFTER_IDLE, 3).hex(' '),
                         'siov_statuses': bridge.peek(PROJECTION_STATUSES, 8).hex(' '),
                     })
+                if interrupted_r_recovery:
+                    state.update({
+                        'interrupted_r_status': bridge.peek(PROJECTION_STATUSES + 3, 1).hex(),
+                        'post_interruption_idle': bridge.peek(PROJECTION_P_IDLE, 3).hex(' '),
+                        'recovery_ready': bridge.peek(PROJECTION_AFTER_READY, 3).hex(' '),
+                        'recovery_reply': bridge.peek(PROJECTION_AFTER_REPLY, 9).hex(' '),
+                        'recovery_terminal_idle': bridge.peek(PROJECTION_AFTER_IDLE, 3).hex(' '),
+                        'siov_statuses': bridge.peek(PROJECTION_STATUSES, 9).hex(' '),
+                    })
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if result != b'NVP!':
@@ -570,18 +674,21 @@ def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention
             time.sleep(.05)
     raise RuntimeError('native projection guest did not reach a terminal result')
 
-def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False, reset_to_idle=False):
+def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False, reset_to_idle=False,
+                                    interrupted_r_recovery=False):
     """Run one literal native-v1 sequence through Altirra, hub, and NetSIO.
 
     This deliberately shares the deterministic boot runner's sidecars, reset
     ordering, Altirra profile, bridge, serial evidence, and cleanup.  The
     only alternate process is a real-core fixture route; it has no SIO peer.
     """
-    if wrong_r_retention and reset_to_idle:
+    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery)) > 1:
         raise ValueError('native projection variants are mutually exclusive')
-    scenario_id = ('native-reset-to-idle' if reset_to_idle else
+    scenario_id = ('native-interrupted-r-recovery' if interrupted_r_recovery else
+                   'native-reset-to-idle' if reset_to_idle else
                    'native-wrong-r-retention' if wrong_r_retention else 'native-core-dispatch')
-    program = (NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
+    program = (NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
+               NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
                NATIVE_WRONG_R_RETENTION_XEX if wrong_r_retention else NATIVE_CORE_DISPATCH_XEX)
     if not program.is_file():
         raise RuntimeError(f'{scenario_id} XEX is missing: {program}')
@@ -591,10 +698,14 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=Fal
     run.mkdir(parents=True, exist_ok=True)
     ps=[]
     try:
+        relay = NetSioTerminalRChecksumRelay(run) if interrupted_r_recovery else None
+        if relay:
+            relay.start()
+        hub_port = '9998' if relay else '9997'
         hub=(run/'hub.log').open('wb'); nio=(run/'nio.log').open('wb'); altirra_log=None
-        ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', '9997'],
+        ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', hub_port],
                          cwd=HUB, stdout=hub, stderr=subprocess.STDOUT))
-        wait_log(run/'hub.log', 'Listening for NetSIO packets on port 9997')
+        wait_log(run/'hub.log', f'Listening for NetSIO packets on port {hub_port}')
         ps.append(launch([str(NATIVE_CORE_DISPATCH), '--host', '127.0.0.1', '--port', '9997'],
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
         wait_log(run/'nio.log', 'Atari NetSIO projection initialized', timeout=15)
@@ -614,7 +725,8 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=Fal
         if reset_to_idle:
             wait_for_projection_step(token, 4, timeout)
             reset_event = inject_netsio_device_reset(token, run / 'hub.log', run / 'nio.log', run, timeout)
-        result=inspect_native_core_dispatch(token, run, timeout, wrong_r_retention, reset_to_idle)
+        result=inspect_native_core_dispatch(token, run, timeout, wrong_r_retention, reset_to_idle,
+                                            interrupted_r_recovery)
         altirra_log.flush()
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
@@ -626,8 +738,18 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=Fal
         result['run_dir']=str(run)
         if reset_event:
             result['reset_event'] = reset_event
+        if relay:
+            relay_summary, relay_path = relay.stop()
+            relay = None
+            if (relay_summary['failure'] or not relay_summary['fault_applied'] or
+                    relay_summary['interrupted_r_attempts'] < 1):
+                raise RuntimeError(f'interrupted-R relay did not corrupt accepted delivery: {relay_summary}')
+            result['delivery_fault'] = relay_summary
+            result['delivery_fault_evidence'] = str(relay_path)
         return result
     finally:
+        if 'relay' in locals() and relay:
+            relay.stop()
         if 'altirra_log' in locals() and altirra_log: altirra_log.close()
         if 'hub' in locals(): hub.close()
         if 'nio' in locals(): nio.close()
@@ -643,6 +765,11 @@ def run_netsio_native_wrong_r_retention(timeout, evidence_dir):
 def run_netsio_native_reset_to_idle(timeout, evidence_dir):
     """Run an injected NetSIO reset while the first native reply is queued."""
     return run_netsio_native_core_dispatch(timeout, evidence_dir, reset_to_idle=True)
+
+
+def run_netsio_native_interrupted_r_recovery(timeout, evidence_dir):
+    """Run accepted R with only its carrier checksum invalidated in transit."""
+    return run_netsio_native_core_dispatch(timeout, evidence_dir, interrupted_r_recovery=True)
 
 def write_netsio_boot_projection(run_result):
     """Write adapter-scoped virtual evidence from the existing boot lifecycle.
@@ -820,13 +947,77 @@ def write_netsio_native_reset_to_idle_projection(run_result):
     result["result_path"] = str(path)
     return result
 
+
+def _assert_interrupted_r_guest_state(run_result):
+    statuses = run_result["siov_statuses"].split()
+    if (len(statuses) != 9 or statuses[:3] != ["01", "01", "01"] or
+            statuses[3] == "01" or statuses[4:] != ["01", "01", "01", "01", "01"] or
+            run_result["post_interruption_idle"] != "00 00 00" or
+            run_result["recovery_ready"] != "02 09 00" or
+            run_result["recovery_reply"] != "01 04 09 00 0f 01 00 5a a5" or
+            run_result["recovery_terminal_idle"] != "00 00 00"):
+        raise RuntimeError("guest did not fail the accepted R then recover through IDLE")
+
+
+def write_netsio_native_interrupted_r_recovery_projection(run_result):
+    """Record accepted-R consumption despite deliberately bad guest delivery."""
+    run = Path(run_result["run_dir"])
+    manifest = validate_manifest(load_manifest())
+    trace = (run / "nio.log").read_text(errors="replace")
+    observed = compare_netsio_native_interrupted_r_recovery(trace, manifest)
+    _assert_interrupted_r_guest_state(run_result)
+    fault = run_result.get("delivery_fault")
+    if (not fault or not fault.get("fault_applied") or fault.get("interrupted_r_attempts", 0) < 1 or
+            not any(event.get("event") == "terminal-r-checksum-corrupted" and
+                    event.get("original") == "1a" and event.get("delivered") == "1b"
+                    for event in fault.get("events", ()))):
+        raise RuntimeError("accepted terminal R has no captured checksum-delivery interruption")
+
+    # Mutate the first post-interruption P result in the capture from IDLE to
+    # READY.  A stale queued response must never satisfy native-v1 recovery.
+    r_marker = trace.find("udp: Received 7 bytes: 02 7F 52 09 00 DA")
+    stale_reply, changed = re.subn(r"(udp: Sending 4 bytes: 02 00 00) 00$",
+                                   r"\g<1> 09", trace[r_marker:], count=1,
+                                   flags=re.MULTILINE)
+    if r_marker < 0 or changed != 1:
+        raise RuntimeError("could not create deliberate unconsumed-response mutation")
+    try:
+        compare_netsio_native_interrupted_r_recovery(trace[:r_marker] + stale_reply, manifest)
+    except ProjectionMismatch:
+        stale_negative_verified = True
+    else:
+        raise RuntimeError("capture with a stale post-R response unexpectedly passed comparison")
+
+    successful_guest = dict(run_result)
+    successful_statuses = run_result["siov_statuses"].split()
+    successful_statuses[3] = "01"
+    successful_guest["siov_statuses"] = " ".join(successful_statuses)
+    try:
+        _assert_interrupted_r_guest_state(successful_guest)
+    except RuntimeError:
+        guest_negative_verified = True
+    else:
+        raise RuntimeError("successful interrupted-R guest status unexpectedly passed verification")
+
+    result = scenario_result("netsio", "native-interrupted-r-recovery", observed,
+                             evidence_paths_for_boot(run, "netsio"),
+                             passed=run_result["guest_result"] == "NVP!")
+    result["delivery_fault"] = fault
+    result["delivery_fault_evidence"] = run_result["delivery_fault_evidence"]
+    result["negative_unconsumed_response_rejected"] = stale_negative_verified
+    result["negative_successful_guest_r_rejected"] = guest_negative_verified
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-native-reset-to-idle-' if a.native_reset_to_idle else
+        evidence_kind = ('atari-sio-native-interrupted-r-recovery-' if a.native_interrupted_r_recovery else
+                         'atari-sio-native-reset-to-idle-' if a.native_reset_to_idle else
                          'atari-sio-native-wrong-r-retention-' if a.native_wrong_r_retention else
                          'atari-sio-native-core-dispatch-' if a.native_core_dispatch else 'atari-sio-boot-')
         evidence_dir = ROOT / 'test-evidence' / (evidence_kind + time.strftime('%Y%m%d-%H%M%S'))
@@ -838,7 +1029,8 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.native_core_dispatch, a.native_wrong_r_retention, a.native_reset_to_idle)) > 1:
+    if sum((a.native_core_dispatch, a.native_wrong_r_retention, a.native_reset_to_idle,
+            a.native_interrupted_r_recovery)) > 1:
         raise ValueError('choose only one native projection')
     if a.native_core_dispatch:
         try:
@@ -872,6 +1064,19 @@ if __name__=='__main__':
             result['virtual_projection_result'] = write_netsio_native_reset_to_idle_projection(result)
             if result['virtual_projection_result']['status'] != 'pass':
                 raise RuntimeError(f"native-reset-to-idle evidence is {result['virtual_projection_result']['status']}")
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_interrupted_r_recovery:
+        try:
+            result = run_netsio_native_interrupted_r_recovery(a.timeout, evidence_dir)
+            result['virtual_projection_result'] = write_netsio_native_interrupted_r_recovery_projection(result)
+            if result['virtual_projection_result']['status'] != 'pass':
+                raise RuntimeError(f"native-interrupted-r-recovery evidence is {result['virtual_projection_result']['status']}")
             result['outcome'] = 'launch'
         except Exception as exc:
             result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}

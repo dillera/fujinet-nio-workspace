@@ -21,6 +21,7 @@ class VirtualProjectionTests(unittest.TestCase):
         ids = {entry["id"] for entry in self.manifest["projections"]}
         self.assertTrue({"native-q-capability", "native-core-dispatch", "native-rejected-w",
                          "native-wrong-r-retention", "native-reset-to-idle",
+                         "native-interrupted-r-recovery",
                          "native-capacity-bounds"} <= ids)
         self.assertEqual(self.manifest["boot_projections"][0]["id"], "boot-page6-config")
 
@@ -217,6 +218,26 @@ class VirtualProjectionTests(unittest.TestCase):
             projection.compare_netsio_native_reset_to_idle(
                 log.replace("udp: Sending 4 bytes: 02 00 00 00", "udp: Sending 4 bytes: 02 00 01 00", 1),
                 self.manifest)
+
+    def test_interrupted_r_fixture_sequence_and_guest_failure_check(self):
+        self.assertEqual(projection.native_projection_fixture_ids(
+            "native-interrupted-r-recovery", self.manifest), [
+                "q-idle", "w-core-dispatch", "p-core-dispatch-ready",
+                "r-core-dispatch-interrupted-consumes", "p-idle-after-consumed-r",
+                "w-core-dispatch-after-interrupted-r", "p-core-dispatch-ready",
+                "r-core-dispatch-after-interrupted-r", "p-idle-after-consumed-r",
+            ])
+        run = {
+            "siov_statuses": "01 01 01 8b 01 01 01 01 01",
+            "post_interruption_idle": "00 00 00",
+            "recovery_ready": "02 09 00",
+            "recovery_reply": "01 04 09 00 0f 01 00 5a a5",
+            "recovery_terminal_idle": "00 00 00",
+        }
+        boot_runner._assert_interrupted_r_guest_state(run)
+        run["siov_statuses"] = "01 01 01 01 01 01 01 01 01"
+        with self.assertRaises(RuntimeError):
+            boot_runner._assert_interrupted_r_guest_state(run)
 
     def test_result_is_adapter_scoped_and_missing_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:

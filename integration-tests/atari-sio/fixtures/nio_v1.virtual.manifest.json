@@ -51,10 +51,13 @@
     {
       "id": "native-interrupted-r-recovery",
       "operations": [
-        {"fixture": "w-idle", "observe": ["command", "data", "response"]},
-        {"fixture": "p-ready", "observe": ["command", "response", "state"]},
-        {"fixture": "r-interrupted-consumes", "observe": ["command", "response", "state"]},
-        {"fixture": "w-idle", "observe": ["command", "data", "response"]}
+        {"fixture": "w-core-dispatch", "observe": ["command", "data", "response"]},
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "r-core-dispatch-interrupted-consumes", "observe": ["command", "response", "transport-error"]},
+        {"fixture": "p-idle-after-consumed-r", "observe": ["command", "response", "state"]},
+        {"fixture": "w-core-dispatch-after-interrupted-r", "observe": ["command", "data", "response"]},
+        {"fixture": "p-core-dispatch-ready", "observe": ["command", "response", "state"]},
+        {"fixture": "r-core-dispatch-after-interrupted-r", "observe": ["command", "response", "state"]}
       ]
     },
     {
