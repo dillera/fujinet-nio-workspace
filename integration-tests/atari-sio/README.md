@@ -76,6 +76,17 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --native-core-dispatch-altirra-embedded --timeout 30
 ```
 
+The embedded wrong-R projection uses the same production device and POKEY
+capture path. It records every physical Atari OS retry as a literal rejected
+R/NAK exchange, then reports their count as one logical
+`native-wrong-r-retention` operation before proving the unchanged READY reply,
+correct terminal R, and IDLE poll.
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-wrong-r-retention-altirra-embedded --timeout 30
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

@@ -509,24 +509,26 @@ def _embedded_sio_events(log):
     return events
 
 
-def compare_altirra_embedded_native_core_dispatch(pokey_log, altirra_log,
-                                                   manifest=None, fixture_data=None):
-    """Byte-verify native-core-dispatch through Altirra's embedded SIO device.
+def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projection_id,
+                                                manifest=None, fixture_data=None):
+    """Byte-verify an approved native projection through Altirra's SIO device.
 
     The input is captured POKEY traffic, not a reconstructed protocol trace.
     The endpoint's deterministic downstream device is allowed to log only its
     real RoutingManager invocation; all command and reply bytes are compared
     to the independent literal fixture.
     """
+    if projection_id not in {"native-core-dispatch", "native-wrong-r-retention"}:
+        raise ProjectionError(f"{projection_id}: no embedded projection comparison is implemented")
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
     fixtures = {item["id"]: item for item in fixture_data["scenarios"]}
-    ids = native_core_dispatch_fixture_ids(manifest)
+    ids = native_projection_fixture_ids(projection_id, manifest)
     dispatches = [int(value) for value in re.findall(
         r"core dispatch fixture route invocation (\d+)", altirra_log)]
     if dispatches != [1]:
         raise ProjectionMismatch(
-            "native-core-dispatch: expected exactly one embedded real-core dispatch, "
+            f"{projection_id}: expected exactly one embedded real-core dispatch, "
             f"observed {dispatches}")
 
     events = _embedded_sio_events(pokey_log)
@@ -534,23 +536,42 @@ def compare_altirra_embedded_native_core_dispatch(pokey_log, altirra_log,
                       if direction == "SendCmd"]
     native_starts = [index for index, (byte, _) in enumerate(command_events)
                      if byte == 0x7f]
-    if len(native_starts) != len(ids):
-        raise ProjectionMismatch(
-            f"native-core-dispatch: expected {len(ids)} native command frames, "
-            f"found {len(native_starts)}")
-
-    command_positions = []
-    for identifier, start in zip(ids, native_starts):
+    physical_frames = []
+    for start in native_starts:
         frame = bytes(byte for byte, _ in command_events[start:start + 5])
-        if len(frame) != 5 or frame != _hex(fixtures[identifier]["frame"]):
-            raise ProjectionMismatch(
-                f"{identifier}: POKEY command frame differs from literal fixture")
-        command_positions.append(command_events[start][1])
+        if len(frame) != 5:
+            raise ProjectionMismatch(f"{projection_id}: truncated native POKEY command frame")
+        physical_frames.append((frame, command_events[start][1]))
 
-    observed = []
-    for ordinal, (identifier, command_position) in enumerate(zip(ids, command_positions)):
-        next_position = (command_positions[ordinal + 1]
-                         if ordinal + 1 < len(command_positions) else float("inf"))
+    # Atari OS retries a NAKed SIOV request.  The retry count is deliberately
+    # not prescribed, but every physical retry must be the literal wrong-R
+    # frame and receive its own NAK before this is collapsed into one logical
+    # fixture operation.
+    expanded_ids = []
+    physical_index = 0
+    for identifier in ids:
+        expected = _hex(fixtures[identifier]["frame"])
+        if identifier == "r-wrong-length-retains":
+            attempts = 0
+            while physical_index < len(physical_frames) and physical_frames[physical_index][0] == expected:
+                expanded_ids.append(identifier)
+                physical_index += 1
+                attempts += 1
+            if not attempts:
+                raise ProjectionMismatch("r-wrong-length-retains: missing wrong-length R")
+            continue
+        if physical_index >= len(physical_frames) or physical_frames[physical_index][0] != expected:
+            raise ProjectionMismatch(f"{identifier}: POKEY command frame differs from literal fixture")
+        expanded_ids.append(identifier)
+        physical_index += 1
+    if physical_index != len(physical_frames):
+        raise ProjectionMismatch(f"{projection_id}: unexpected extra native command frame")
+
+    physical_observed = []
+    for ordinal, (identifier, (_, command_position)) in enumerate(
+            zip(expanded_ids, physical_frames)):
+        next_position = (physical_frames[ordinal + 1][1]
+                         if ordinal + 1 < len(physical_frames) else float("inf"))
         window = [(direction, byte) for direction, byte, position in events
                   if command_position < position < next_position]
         fixture = fixtures[identifier]
@@ -576,17 +597,42 @@ def compare_altirra_embedded_native_core_dispatch(pokey_log, altirra_log,
                     f"{identifier}: POKEY W data/checksum differs from literal fixture")
             entry["data"] = expected_data.hex(" ")
             entry["checksum"] = f"{expected_checksum:02x}"
+        elif any(direction == "Send" for direction, _ in window):
+            raise ProjectionMismatch(f"{identifier}: unexpected native outgoing data")
         entry["response"] = {
             "controls": [chr(value) for value in physical_controls],
             "payload": payload.hex(" "),
             "checksum": None if payload_checksum is None else f"{payload_checksum:02x}",
         }
+        physical_observed.append(entry)
+
+    observed = []
+    for entry in physical_observed:
+        if entry["fixture"] == "r-wrong-length-retains":
+            if observed and observed[-1]["fixture"] == entry["fixture"]:
+                observed[-1]["siov_attempts"] += 1
+                continue
+            entry["siov_attempts"] = 1
         observed.append(entry)
 
     projection = next(item for item in manifest["projections"]
-                      if item["id"] == "native-core-dispatch")
+                      if item["id"] == projection_id)
     compare_observed_operations(projection, [entry["fixture"] for entry in observed[1:-1]])
     return observed
+
+
+def compare_altirra_embedded_native_core_dispatch(pokey_log, altirra_log,
+                                                   manifest=None, fixture_data=None):
+    """Compatibility wrapper for the established embedded core projection."""
+    return compare_altirra_embedded_native_projection(
+        pokey_log, altirra_log, "native-core-dispatch", manifest, fixture_data)
+
+
+def compare_altirra_embedded_native_wrong_r_retention(pokey_log, altirra_log,
+                                                       manifest=None, fixture_data=None):
+    """Byte-verify retained response state after one or more rejected R attempts."""
+    return compare_altirra_embedded_native_projection(
+        pokey_log, altirra_log, "native-wrong-r-retention", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):
