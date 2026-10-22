@@ -86,11 +86,16 @@
       "id": "native-capacity-bounds",
       "operations": [
         {"fixture": "w-511", "observe": ["command", "data", "response"]},
+        {"fixture": "p-ready-7", "observe": ["command", "response", "state"]},
+        {"fixture": "r-ready-7", "observe": ["command", "response", "state"]},
         {"fixture": "w-512", "observe": ["command", "data", "response"]},
-        {"fixture": "w-513-local-reject", "observe": ["command", "client-outcome"]},
         {"fixture": "p-ready-512", "observe": ["command", "response", "state"]},
         {"fixture": "r-ready-512", "observe": ["command", "response", "state"]},
-        {"fixture": "p-ready-513-retains", "observe": ["command", "response", "client-outcome"]}
+        {"fixture": "p-idle-after-consumed-r", "observe": ["command", "response", "state"]},
+        {"fixture": "w-513-rejected", "observe": ["command", "response", "client-outcome"]},
+        {"fixture": "w-oversize-response", "observe": ["command", "data", "response"]},
+        {"fixture": "p-ready-7", "observe": ["command", "response", "state"]},
+        {"fixture": "r-bounded-error-response", "observe": ["command", "response", "state"]}
       ]
     }
   ],

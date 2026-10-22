@@ -239,6 +239,31 @@ class VirtualProjectionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._assert_interrupted_r_guest_state(run)
 
+    def test_capacity_fixture_sequence_and_guest_boundary_checks(self):
+        self.assertEqual(projection.native_projection_fixture_ids(
+            "native-capacity-bounds", self.manifest), [
+                "q-idle", "w-511", "p-ready-7", "r-ready-7", "w-512",
+                "p-ready-512", "r-ready-512", "p-idle-after-consumed-r",
+                "w-513-rejected", "w-oversize-response", "p-ready-7",
+                "r-bounded-error-response", "p-idle-after-consumed-r",
+            ])
+        fixtures = {item["id"]: item for item in projection.load_json(projection.NIO_PATH)["scenarios"]}
+        run = {
+            "siov_statuses": "01 01 01 01 01 01 01 01 8b 01 01 01 01",
+            "capacity_ready_512": "02 00 02",
+            "capacity_idle_after_512": "00 00 00",
+            "capacity_bounded_ready": "02 07 00",
+            "capacity_bounded_reply": "01 07 07 00 17 01 07",
+            "capacity_terminal_idle": "00 00 00",
+            "capacity_response": projection.fixture_payload(fixtures["r-ready-512"]).hex(" "),
+            "capacity_canaries": {"request_low": "5a", "request_high": "a5",
+                                  "response_low": "5a", "response_high": "a5"},
+        }
+        boot_runner._assert_capacity_guest_state(run)
+        run["capacity_canaries"]["response_high"] = "00"
+        with self.assertRaises(RuntimeError):
+            boot_runner._assert_capacity_guest_state(run)
+
     def test_result_is_adapter_scoped_and_missing_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)

@@ -150,11 +150,15 @@ def native_projection_fixture_ids(projection_id, manifest=None):
             "r-core-dispatch-interrupted-consumes", "p-idle-after-consumed-r",
             "w-core-dispatch-after-interrupted-r", "p-core-dispatch-ready",
             "r-core-dispatch-after-interrupted-r"],
+        "native-capacity-bounds": [
+            "w-511", "p-ready-7", "r-ready-7", "w-512", "p-ready-512",
+            "r-ready-512", "p-idle-after-consumed-r", "w-513-rejected",
+            "w-oversize-response", "p-ready-7", "r-bounded-error-response"],
     }
     if projection_id not in approved or ids != approved[projection_id]:
         raise ProjectionError(f"{projection_id}: projection no longer names the approved literal sequence")
     terminal_idle = ("p-idle-after-consumed-r"
-                     if projection_id == "native-interrupted-r-recovery"
+                     if projection_id in {"native-interrupted-r-recovery", "native-capacity-bounds"}
                      else "reset-clears")
     return ["q-idle", *ids, terminal_idle]
 
@@ -166,6 +170,31 @@ def native_core_dispatch_fixture_ids(manifest=None):
 
 def _hex(value):
     return bytes.fromhex(value) if value else b""
+
+
+def fixture_payload(fixture):
+    """Materialize an independent raw-packet pattern named by a fixture."""
+    if "payload" in fixture:
+        return _hex(fixture["payload"])
+    raw = fixture.get("raw_fujibus")
+    if raw is None:
+        return b""
+    if raw.get("payload_pattern") != "packet_offset ^ (packet_offset >> 8) ^ 0xa5":
+        raise ProjectionError(f"{fixture['id']}: unsupported raw-packet pattern")
+    packet = bytearray((raw["device"], raw["fujibus_command"], 0, 0, 0, 0))
+    if "status" in raw:
+        packet[5] = 1
+        packet.append(raw["status"])
+    if raw["payload_offset"] != len(packet):
+        raise ProjectionError(f"{fixture['id']}: raw packet offset is invalid")
+    packet.extend((offset ^ (offset >> 8) ^ 0xa5) & 0xff
+                  for offset in range(raw["payload_offset"],
+                                      raw["payload_offset"] + raw["payload_length"]))
+    packet[2:4] = len(packet).to_bytes(2, "little")
+    packet[4] = sio_checksum(packet)
+    if packet[4] != int(raw["packet_checksum"], 16):
+        raise ProjectionError(f"{fixture['id']}: raw packet checksum differs from literal fixture")
+    return bytes(packet)
 
 
 def _nio_datagrams(log):
@@ -196,7 +225,7 @@ def _fixture_reply(fixture, command):
     # R keeps its literal packet bytes in the fixture request/response pair,
     # while Q and P carry their bytes directly in reply.
     payload = reply_payload if reply_payload is not None else (
-        _hex(fixture.get("payload", "")) if command == "R" else b"")
+        fixture_payload(fixture) if command == "R" else b"")
     checksum = (int(fixture["payload_checksum"], 16)
                 if payload and "payload_checksum" in fixture else
                 sio_checksum(payload) if payload else None)
@@ -250,7 +279,8 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
     """
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
-    dispatches = 2 if projection_id in {"native-reset-to-idle", "native-interrupted-r-recovery"} else 1
+    dispatches = 2 if projection_id in {"native-reset-to-idle", "native-interrupted-r-recovery"} else \
+        3 if projection_id == "native-capacity-bounds" else 1
     observed_dispatches = [int(value) for value in re.findall(
         r"core-dispatch fixture route invocation (\d+)", log)]
     if observed_dispatches != list(range(1, dispatches + 1)):
@@ -300,6 +330,18 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
                 expanded_ids.append("r-core-dispatch-consumed-nak")
                 position_index += 1
             continue
+        if identifier == "w-513-rejected":
+            attempts = 0
+            while position_index < len(command_positions):
+                observed_command = events[command_positions[position_index]][1][1:6]
+                if observed_command != expected_command:
+                    break
+                expanded_ids.append(identifier)
+                position_index += 1
+                attempts += 1
+            if attempts == 0:
+                raise ProjectionMismatch("w-513-rejected: SIOV did not issue the bounded W")
+            continue
         if position_index >= len(command_positions):
             raise ProjectionMismatch(f"{identifier}: missing native command frame")
         if events[command_positions[position_index]][1][1:6] != expected_command:
@@ -340,31 +382,47 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
         command = fixture["command"]
         controls, response_payload, response_checksum = _fixture_reply(fixture, command)
         if command == "W":
-            if controls != [ord("A"), ord("C")] or response_payload or response_checksum is not None:
-                raise ProjectionError(f"{identifier}: literal fixture no longer describes accepted W")
-            payload = _hex(fixture["payload"])
-            expected_checksum = int(fixture["payload_checksum"], 16)
+            payload = fixture_payload(fixture)
+            expected_checksum = (int(fixture["payload_checksum"], 16)
+                                 if payload else None)
             incoming = [data for direction, data in window
                         if direction == "received" and data and data[0] in (0x02, 0x09)]
-            if len(incoming) != 2:
-                raise ProjectionMismatch(f"{identifier}: expected exactly one payload and one checksum datagram")
-            data_frame, checksum_frame = incoming
-            if len(data_frame) != len(payload) + 2 or data_frame[1:-1] != payload:
-                raise ProjectionMismatch(f"{identifier}: payload differs from literal fixture")
-            if len(checksum_frame) != 4 or checksum_frame[:2] != bytes((0x09, expected_checksum)):
-                raise ProjectionMismatch(f"{identifier}: payload checksum differs from literal fixture")
-            response_packets = _native_response_datagrams(window)
-            _assert_response_packets(identifier, response_packets, [
-                # NetSIO's receive grant includes the SIO checksum byte; the
-                # literal W AUX remains the packet-data length.
-                ("sync", ord("A"), fixture["aux"] + 1),
-                ("sync", ord("A"), 0),
-                ("byte", ord("C"), 0),
-            ])
-            entry.update({"data": data_frame[1:-1].hex(' '), "checksum": f"{checksum_frame[1]:02x}",
-                          "response": {"controls": [chr(response_packets[1][3]),
-                                                    chr(response_packets[2][1])],
-                                       "payload": "", "checksum": None}})
+            if controls == [ord("N")]:
+                if incoming:
+                    raise ProjectionMismatch(f"{identifier}: rejected W entered a data phase")
+                response_packets = _native_response_datagrams(window)
+                _assert_response_packets(identifier, response_packets, [("sync", ord("N"), 0)])
+                entry.update({"data": "", "checksum": None,
+                              "response": {"controls": ["N"], "payload": "", "checksum": None}})
+            elif controls == [ord("A"), ord("C")] and not response_payload and response_checksum is None:
+                data_frames = [data for data in incoming if data[0] == 0x02]
+                checksum_frames = [data for data in incoming if data[0] == 0x09]
+                if not data_frames or len(checksum_frames) != 1:
+                    raise ProjectionMismatch(f"{identifier}: expected native data and one checksum datagram")
+                # NetSIO credit flow may divide one physical SIO data phase
+                # into carrier DATA_BLOCKs.  It never changes the one native
+                # packet: concatenate every block (excluding its sequence
+                # byte) and reject any missing, duplicate, or padded byte.
+                delivered = b"".join(frame[1:-1] for frame in data_frames)
+                checksum_frame = checksum_frames[0]
+                if delivered != payload:
+                    raise ProjectionMismatch(f"{identifier}: payload differs from literal fixture")
+                if len(checksum_frame) != 4 or checksum_frame[:2] != bytes((0x09, expected_checksum)):
+                    raise ProjectionMismatch(f"{identifier}: payload checksum differs from literal fixture")
+                response_packets = _native_response_datagrams(window)
+                _assert_response_packets(identifier, response_packets, [
+                    # NetSIO's receive grant includes the SIO checksum byte; the
+                    # literal W AUX remains the packet-data length.
+                    ("sync", ord("A"), fixture["aux"] + 1),
+                    ("sync", ord("A"), 0),
+                    ("byte", ord("C"), 0),
+                ])
+                entry.update({"data": delivered.hex(' '), "checksum": f"{checksum_frame[1]:02x}",
+                              "response": {"controls": [chr(response_packets[1][3]),
+                                                        chr(response_packets[2][1])],
+                                           "payload": "", "checksum": None}})
+            else:
+                raise ProjectionError(f"{identifier}: fixture is not an accepted or bounded-rejected W")
         else:
             if not controls:
                 raise ProjectionError(f"{identifier}: projection fixture must describe a control reply")
@@ -388,11 +446,11 @@ def compare_netsio_native_projection(log, projection_id, manifest=None, fixture_
 
     observed = []
     for entry in physical_observed:
-        if entry["fixture"] == "r-wrong-length-retains" and observed and \
-           observed[-1]["fixture"] == "r-wrong-length-retains":
+        if entry["fixture"] in {"r-wrong-length-retains", "w-513-rejected"} and observed and \
+           observed[-1]["fixture"] == entry["fixture"]:
             observed[-1]["siov_attempts"] += 1
         else:
-            if entry["fixture"] == "r-wrong-length-retains":
+            if entry["fixture"] in {"r-wrong-length-retains", "w-513-rejected"}:
                 entry["siov_attempts"] = 1
             observed.append(entry)
 
@@ -430,6 +488,11 @@ def compare_netsio_native_reset_to_idle(log, manifest=None, fixture_data=None):
 def compare_netsio_native_interrupted_r_recovery(log, manifest=None, fixture_data=None):
     """Verify an accepted terminal R that was consumed before guest failure."""
     return compare_netsio_native_projection(log, "native-interrupted-r-recovery", manifest, fixture_data)
+
+
+def compare_netsio_native_capacity_bounds(log, manifest=None, fixture_data=None):
+    """Byte-verify packet-native 511/512/513-byte behavior through NetSIO."""
+    return compare_netsio_native_projection(log, "native-capacity-bounds", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):

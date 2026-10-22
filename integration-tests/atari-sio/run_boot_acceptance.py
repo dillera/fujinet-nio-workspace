@@ -9,6 +9,7 @@ from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_netsio_native_wrong_r_retention,
                                 compare_netsio_native_reset_to_idle,
                                 compare_netsio_native_interrupted_r_recovery,
+                                compare_netsio_native_capacity_bounds, fixture_payload,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
 
@@ -18,6 +19,7 @@ NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
 NATIVE_INTERRUPTED_R_RECOVERY_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-interrupted-r-recovery.xex"
+NATIVE_CAPACITY_BOUNDS_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-capacity-bounds.xex"
 TRACE_FIXTURE = ROOT / "integration-tests/atari-sio/fixtures/boot_acceptance_trace.json"
 PROFILE = ROOT / "configs/atari/profiles/atari-nio-config-boot.yaml"
 ALTIRRA = ROOT / "repos/AltirraSDL/build/linux-debug/src/AltirraSDL/AltirraSDL"
@@ -37,6 +39,11 @@ PROJECTION_RESET_GO = 0x089f
 PROJECTION_AFTER_READY = 0x08b0
 PROJECTION_AFTER_REPLY = 0x08c0
 PROJECTION_AFTER_IDLE = 0x08d0
+PROJECTION_CAPACITY_REQUEST_GUARD_LOW = 0x1fff
+PROJECTION_CAPACITY_REQUEST_GUARD_HIGH = 0x2200
+PROJECTION_CAPACITY_RESPONSE_GUARD_LOW = 0x23ff
+PROJECTION_CAPACITY_RESPONSE = 0x2400
+PROJECTION_CAPACITY_RESPONSE_GUARD_HIGH = 0x2600
 # A bridge pause can capture any instruction-boundary phase of the three-byte
 # JMP $0624 loop, including the post-operand PC just before its target applies.
 LOOP_PCS = {LOOP, LOOP + 1, LOOP + 2, LOOP + 3}
@@ -625,7 +632,7 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         stop(ps)
 
 def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention=False, reset_to_idle=False,
-                                 interrupted_r_recovery=False):
+                                 interrupted_r_recovery=False, capacity_bounds=False):
     """Wait for the real guest XEX and capture its independently checked data."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -666,6 +673,22 @@ def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention
                         'recovery_terminal_idle': bridge.peek(PROJECTION_AFTER_IDLE, 3).hex(' '),
                         'siov_statuses': bridge.peek(PROJECTION_STATUSES, 9).hex(' '),
                     })
+                if capacity_bounds:
+                    state.update({
+                        'capacity_ready_512': bridge.peek(PROJECTION_P_READY, 3).hex(' '),
+                        'capacity_idle_after_512': bridge.peek(PROJECTION_P_IDLE, 3).hex(' '),
+                        'capacity_bounded_ready': bridge.peek(PROJECTION_AFTER_READY, 3).hex(' '),
+                        'capacity_bounded_reply': bridge.peek(PROJECTION_AFTER_REPLY, 7).hex(' '),
+                        'capacity_terminal_idle': bridge.peek(PROJECTION_AFTER_IDLE, 3).hex(' '),
+                        'capacity_response': bridge.peek(PROJECTION_CAPACITY_RESPONSE, 512).hex(' '),
+                        'capacity_canaries': {
+                            'request_low': bridge.peek(PROJECTION_CAPACITY_REQUEST_GUARD_LOW, 1).hex(),
+                            'request_high': bridge.peek(PROJECTION_CAPACITY_REQUEST_GUARD_HIGH, 1).hex(),
+                            'response_low': bridge.peek(PROJECTION_CAPACITY_RESPONSE_GUARD_LOW, 1).hex(),
+                            'response_high': bridge.peek(PROJECTION_CAPACITY_RESPONSE_GUARD_HIGH, 1).hex(),
+                        },
+                        'siov_statuses': bridge.peek(PROJECTION_STATUSES, 13).hex(' '),
+                    })
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if result != b'NVP!':
@@ -675,19 +698,21 @@ def inspect_native_core_dispatch(token, evidence_dir, timeout, wrong_r_retention
     raise RuntimeError('native projection guest did not reach a terminal result')
 
 def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False, reset_to_idle=False,
-                                    interrupted_r_recovery=False):
+                                    interrupted_r_recovery=False, capacity_bounds=False):
     """Run one literal native-v1 sequence through Altirra, hub, and NetSIO.
 
     This deliberately shares the deterministic boot runner's sidecars, reset
     ordering, Altirra profile, bridge, serial evidence, and cleanup.  The
     only alternate process is a real-core fixture route; it has no SIO peer.
     """
-    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery)) > 1:
+    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery, capacity_bounds)) > 1:
         raise ValueError('native projection variants are mutually exclusive')
-    scenario_id = ('native-interrupted-r-recovery' if interrupted_r_recovery else
+    scenario_id = ('native-capacity-bounds' if capacity_bounds else
+                   'native-interrupted-r-recovery' if interrupted_r_recovery else
                    'native-reset-to-idle' if reset_to_idle else
                    'native-wrong-r-retention' if wrong_r_retention else 'native-core-dispatch')
-    program = (NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
+    program = (NATIVE_CAPACITY_BOUNDS_XEX if capacity_bounds else
+               NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
                NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
                NATIVE_WRONG_R_RETENTION_XEX if wrong_r_retention else NATIVE_CORE_DISPATCH_XEX)
     if not program.is_file():
@@ -706,8 +731,12 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=Fal
         ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', hub_port],
                          cwd=HUB, stdout=hub, stderr=subprocess.STDOUT))
         wait_log(run/'hub.log', f'Listening for NetSIO packets on port {hub_port}')
+        endpoint_env = os.environ.copy()
+        if capacity_bounds:
+            # The 512-byte capture is evidence, not a sampled debug prefix.
+            endpoint_env['FUJINET_FULL_PACKET_LOG'] = '1'
         ps.append(launch([str(NATIVE_CORE_DISPATCH), '--host', '127.0.0.1', '--port', '9997'],
-                         cwd=run, stdout=nio, stderr=subprocess.STDOUT))
+                         cwd=run, env=endpoint_env, stdout=nio, stderr=subprocess.STDOUT))
         wait_log(run/'nio.log', 'Atari NetSIO projection initialized', timeout=15)
         before=set(Path('/tmp').glob('altirra-bridge-*.token'))
         cmd, env, temps = altirra_command(False, trace_serial=True, program=program)
@@ -726,7 +755,7 @@ def run_netsio_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=Fal
             wait_for_projection_step(token, 4, timeout)
             reset_event = inject_netsio_device_reset(token, run / 'hub.log', run / 'nio.log', run, timeout)
         result=inspect_native_core_dispatch(token, run, timeout, wrong_r_retention, reset_to_idle,
-                                            interrupted_r_recovery)
+                                            interrupted_r_recovery, capacity_bounds)
         altirra_log.flush()
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
@@ -770,6 +799,11 @@ def run_netsio_native_reset_to_idle(timeout, evidence_dir):
 def run_netsio_native_interrupted_r_recovery(timeout, evidence_dir):
     """Run accepted R with only its carrier checksum invalidated in transit."""
     return run_netsio_native_core_dispatch(timeout, evidence_dir, interrupted_r_recovery=True)
+
+
+def run_netsio_native_capacity_bounds(timeout, evidence_dir):
+    """Run 511/512/513 packet bounds against the production NetSIO endpoint."""
+    return run_netsio_native_core_dispatch(timeout, evidence_dir, capacity_bounds=True)
 
 def write_netsio_boot_projection(run_result):
     """Write adapter-scoped virtual evidence from the existing boot lifecycle.
@@ -1010,13 +1044,104 @@ def write_netsio_native_interrupted_r_recovery_projection(run_result):
     result["result_path"] = str(path)
     return result
 
+
+def _capacity_response_data_mutation(trace):
+    """Corrupt one captured middle byte of the 512-byte terminal R datagram."""
+    prefix = "udp: Sending 513 bytes: "
+    for line in trace.splitlines(keepends=True):
+        position = line.find(prefix)
+        if position < 0:
+            continue
+        data = bytes.fromhex(line[position + len(prefix):].strip())
+        if len(data) == 513 and data[:7] == bytes((0x02, 0x01, 0x06, 0x00, 0x02, 0x8b, 0x01)):
+            corrupted = bytearray(data)
+            corrupted[260] ^= 0x01
+            replacement = (line[:position] + prefix + corrupted.hex(' ').upper() +
+                           ('\n' if line.endswith('\n') else ''))
+            return trace.replace(line, replacement, 1)
+    raise RuntimeError("could not find the captured 512-byte native R payload")
+
+
+def _assert_capacity_guest_state(run_result):
+    fixture_data = json.loads((ROOT / "integration-tests/atari-sio/fixtures/nio_v1.json").read_text())
+    fixtures = {item["id"]: item for item in fixture_data["scenarios"]}
+    expected_response = fixture_payload(fixtures["r-ready-512"]).hex(' ')
+    statuses = run_result["siov_statuses"].split()
+    if (len(statuses) != 13 or statuses[:8] != ["01"] * 8 or statuses[8] == "01" or
+            statuses[9:] != ["01"] * 4 or
+            run_result["capacity_ready_512"] != "02 00 02" or
+            run_result["capacity_idle_after_512"] != "00 00 00" or
+            run_result["capacity_bounded_ready"] != "02 07 00" or
+            run_result["capacity_bounded_reply"] != "01 07 07 00 17 01 07" or
+            run_result["capacity_terminal_idle"] != "00 00 00" or
+            run_result["capacity_response"] != expected_response or
+            run_result["capacity_canaries"] != {
+                "request_low": "5a", "request_high": "a5",
+                "response_low": "5a", "response_high": "a5"}):
+        raise RuntimeError("guest did not preserve canaries and exact bounded packet results")
+
+
+def write_netsio_native_capacity_bounds_projection(run_result):
+    """Record only a byte-complete 511/512/513 production NetSIO execution."""
+    run = Path(run_result["run_dir"])
+    manifest = validate_manifest(load_manifest())
+    trace = (run / "nio.log").read_text(errors="replace")
+    observed = compare_netsio_native_capacity_bounds(trace, manifest)
+    _assert_capacity_guest_state(run_result)
+
+    corrupted = _capacity_response_data_mutation(trace)
+    try:
+        compare_netsio_native_capacity_bounds(corrupted, manifest)
+    except ProjectionMismatch:
+        middle_byte_negative_verified = True
+    else:
+        raise RuntimeError("corrupted 512-byte response unexpectedly passed comparison")
+
+    wrong_length, changed = re.subn(
+        r"(udp: Sending )513( bytes: 02 01 06 00 02 8B 01)", r"\g<1>512\g<2>",
+        trace, count=1)
+    if changed != 1:
+        raise RuntimeError("could not create deliberate 512-byte length mutation")
+    try:
+        compare_netsio_native_capacity_bounds(wrong_length, manifest)
+    except ProjectionMismatch:
+        length_negative_verified = True
+    else:
+        raise RuntimeError("incorrect 512-byte response length unexpectedly passed comparison")
+
+    marker = "udp: Sending 513 bytes: 02 01 06 00 02 8B 01"
+    marker_position = trace.find(marker)
+    line_start = trace.rfind("\n", 0, marker_position) + 1
+    line_end = trace.find("\n", marker_position)
+    if line_start < 0 or line_end < 0:
+        raise RuntimeError("could not create deliberate duplicated 512-byte data mutation")
+    line = trace[line_start:line_end + 1]
+    duplicated = trace[:line_end + 1] + line + trace[line_end + 1:]
+    try:
+        compare_netsio_native_capacity_bounds(duplicated, manifest)
+    except ProjectionMismatch:
+        duplicate_negative_verified = True
+    else:
+        raise RuntimeError("duplicated 512-byte response unexpectedly passed comparison")
+
+    result = scenario_result("netsio", "native-capacity-bounds", observed,
+                             evidence_paths_for_boot(run, "netsio"),
+                             passed=run_result["guest_result"] == "NVP!")
+    result["negative_middle_byte_mutation_rejected"] = middle_byte_negative_verified
+    result["negative_length_mutation_rejected"] = length_negative_verified
+    result["negative_duplicate_data_mutation_rejected"] = duplicate_negative_verified
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-native-interrupted-r-recovery-' if a.native_interrupted_r_recovery else
+        evidence_kind = ('atari-sio-native-capacity-bounds-' if a.native_capacity_bounds else
+                         'atari-sio-native-interrupted-r-recovery-' if a.native_interrupted_r_recovery else
                          'atari-sio-native-reset-to-idle-' if a.native_reset_to_idle else
                          'atari-sio-native-wrong-r-retention-' if a.native_wrong_r_retention else
                          'atari-sio-native-core-dispatch-' if a.native_core_dispatch else 'atari-sio-boot-')
@@ -1030,7 +1155,7 @@ if __name__=='__main__':
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
     if sum((a.native_core_dispatch, a.native_wrong_r_retention, a.native_reset_to_idle,
-            a.native_interrupted_r_recovery)) > 1:
+            a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
     if a.native_core_dispatch:
         try:
@@ -1077,6 +1202,19 @@ if __name__=='__main__':
             result['virtual_projection_result'] = write_netsio_native_interrupted_r_recovery_projection(result)
             if result['virtual_projection_result']['status'] != 'pass':
                 raise RuntimeError(f"native-interrupted-r-recovery evidence is {result['virtual_projection_result']['status']}")
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_capacity_bounds:
+        try:
+            result = run_netsio_native_capacity_bounds(a.timeout, evidence_dir)
+            result['virtual_projection_result'] = write_netsio_native_capacity_bounds_projection(result)
+            if result['virtual_projection_result']['status'] != 'pass':
+                raise RuntimeError(f"native-capacity-bounds evidence is {result['virtual_projection_result']['status']}")
             result['outcome'] = 'launch'
         except Exception as exc:
             result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}

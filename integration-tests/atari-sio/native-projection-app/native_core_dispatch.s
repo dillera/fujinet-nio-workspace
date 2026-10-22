@@ -35,6 +35,12 @@ REQUEST_AFTER = $08a0
 P_AFTER_READY = $08b0
 R_AFTER = $08c0
 P_AFTER_IDLE = $08d0
+CAP_REQUEST = $2000
+CAP_REQUEST_511_GUARD = $21ff
+CAP_REQUEST_GUARD = $2200
+CAP_RESPONSE_GUARD_LOW = $23ff
+CAP_RESPONSE = $2400
+CAP_RESPONSE_GUARD_HIGH = $2600
 
 .code
 _main:
@@ -72,6 +78,10 @@ _main:
         inx
         cpx #4
         bne @q
+
+ .ifdef CAPACITY_BOUNDS
+        jmp capacity_bounds
+ .endif
 
         ; Literal w-core-dispatch packet from nio_v1.json.
         lda #2
@@ -515,6 +525,382 @@ _main:
         cpx #3
         bne @pidle
 
+ .ifdef CAPACITY_BOUNDS
+; This branch stays a real SIOV client.  The fixture route is only the core
+; device behind the production NetSIO ingress; it never supplies Q/W/P/R.
+fail:   jmp native_fail
+
+.macro capacity_bne_fail
+        beq :+
+        jmp native_fail
+:
+.endmacro
+
+.macro capacity_beq_fail
+        bne :+
+        jmp native_fail
+:
+.endmacro
+
+capacity_bounds:
+        lda #$5a
+        sta CAP_REQUEST-1
+        sta CAP_REQUEST_511_GUARD
+        sta CAP_RESPONSE_GUARD_LOW
+        lda #$a5
+        sta CAP_REQUEST_GUARD
+        sta CAP_RESPONSE_GUARD_HIGH
+
+        ; A parseable 511-byte raw FujiBus W: header plus patterned data.
+        jsr build_w511
+        lda #1
+        sta STEP
+        lda #$ff
+        sta COUNT
+        lda #1
+        sta COUNT+1
+        ldx #<CAP_REQUEST
+        ldy #>CAP_REQUEST
+        lda #'W'
+        jsr call_sio
+        sta STATUS+1
+        cmp #1
+        capacity_bne_fail
+        lda CAP_REQUEST-1
+        cmp #$5a
+        capacity_bne_fail
+        lda CAP_REQUEST_511_GUARD
+        cmp #$5a
+        capacity_bne_fail
+        lda CAP_REQUEST_GUARD
+        cmp #$a5
+        capacity_bne_fail
+
+        ; Consume the small successful 511-byte-request response before W512.
+        lda #2
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_READY
+        ldy #>P_READY
+        lda #'P'
+        jsr call_sio
+        sta STATUS+2
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_p7a:
+        lda P_READY,x
+        cmp p_ready_7_expected,x
+        capacity_bne_fail
+        inx
+        cpx #3
+        bne @capacity_p7a
+        lda #3
+        sta STEP
+        lda #7
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<R_AFTER
+        ldy #>R_AFTER
+        lda #'R'
+        jsr call_sio
+        sta STATUS+3
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_r7:
+        lda R_AFTER,x
+        cmp r_511_expected,x
+        capacity_bne_fail
+        inx
+        cpx #7
+        bne @capacity_r7
+
+        ; The full 512-byte raw request crosses two pages without padding.
+        jsr build_w512
+        lda #4
+        sta STEP
+        lda #0
+        sta COUNT
+        lda #2
+        sta COUNT+1
+        ldx #<CAP_REQUEST
+        ldy #>CAP_REQUEST
+        lda #'W'
+        jsr call_sio
+        sta STATUS+4
+        cmp #1
+        capacity_bne_fail
+        lda CAP_REQUEST-1
+        cmp #$5a
+        capacity_bne_fail
+        lda CAP_REQUEST_GUARD
+        cmp #$a5
+        capacity_bne_fail
+
+        lda #5
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_READY
+        ldy #>P_READY
+        lda #'P'
+        jsr call_sio
+        sta STATUS+5
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_p512:
+        lda P_READY,x
+        cmp p_ready_512_expected,x
+        capacity_bne_fail
+        inx
+        cpx #3
+        bne @capacity_p512
+
+        lda #6
+        sta STEP
+        lda #0
+        sta COUNT
+        lda #2
+        sta COUNT+1
+        ldx #<CAP_RESPONSE
+        ldy #>CAP_RESPONSE
+        lda #'R'
+        jsr call_sio
+        sta STATUS+6
+        cmp #1
+        capacity_bne_fail
+        jsr verify_r512
+        lda CAP_RESPONSE_GUARD_LOW
+        cmp #$5a
+        capacity_bne_fail
+        lda CAP_RESPONSE_GUARD_HIGH
+        cmp #$a5
+        capacity_bne_fail
+
+        lda #7
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_IDLE
+        ldy #>P_IDLE
+        lda #'P'
+        jsr call_sio
+        sta STATUS+7
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_idle_after_512:
+        lda P_IDLE,x
+        cmp p_idle_expected,x
+        capacity_bne_fail
+        inx
+        cpx #3
+        bne @capacity_idle_after_512
+
+        ; 513 is rejected by the endpoint before it grants a data phase.
+        lda #8
+        sta STEP
+        lda #1
+        sta COUNT
+        lda #2
+        sta COUNT+1
+        ldx #<CAP_REQUEST
+        ldy #>CAP_REQUEST
+        lda #'W'
+        jsr call_sio
+        sta STATUS+8
+        cmp #1
+        capacity_beq_fail
+
+        ; A real core response larger than 512 is atomically replaced by the
+        ; bounded raw InternalError response; no partial R is permitted.
+        lda #1
+        sta CAP_REQUEST
+        lda #7
+        sta CAP_REQUEST+1
+        lda #6
+        sta CAP_REQUEST+2
+        lda #0
+        sta CAP_REQUEST+3
+        lda #$0e
+        sta CAP_REQUEST+4
+        lda #0
+        sta CAP_REQUEST+5
+        lda #9
+        sta STEP
+        lda #6
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<CAP_REQUEST
+        ldy #>CAP_REQUEST
+        lda #'W'
+        jsr call_sio
+        sta STATUS+9
+        cmp #1
+        capacity_bne_fail
+        lda #10
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_AFTER_READY
+        ldy #>P_AFTER_READY
+        lda #'P'
+        jsr call_sio
+        sta STATUS+10
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_p7b:
+        lda P_AFTER_READY,x
+        cmp p_ready_7_expected,x
+        capacity_bne_fail
+        inx
+        cpx #3
+        bne @capacity_p7b
+        lda #11
+        sta STEP
+        lda #7
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<R_AFTER
+        ldy #>R_AFTER
+        lda #'R'
+        jsr call_sio
+        sta STATUS+11
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_error:
+        lda R_AFTER,x
+        cmp r_bounded_error_expected,x
+        capacity_bne_fail
+        inx
+        cpx #7
+        bne @capacity_error
+        lda #12
+        sta STEP
+        lda #3
+        sta COUNT
+        lda #0
+        sta COUNT+1
+        ldx #<P_AFTER_IDLE
+        ldy #>P_AFTER_IDLE
+        lda #'P'
+        jsr call_sio
+        sta STATUS+12
+        cmp #1
+        capacity_bne_fail
+        ldx #0
+@capacity_terminal_idle:
+        lda P_AFTER_IDLE,x
+        cmp p_idle_expected,x
+        capacity_bne_fail
+        inx
+        cpx #3
+        bne @capacity_terminal_idle
+        jmp success
+
+build_w511:
+        lda #1
+        sta CAP_REQUEST
+        lda #5
+        sta CAP_REQUEST+1
+        lda #$ff
+        sta CAP_REQUEST+2
+        lda #1
+        sta CAP_REQUEST+3
+        lda #$d0
+        sta CAP_REQUEST+4
+        lda #0
+        sta CAP_REQUEST+5
+        ldx #6
+@w511_page0:
+        txa
+        eor #$a5
+        sta CAP_REQUEST,x
+        inx
+        bne @w511_page0
+        ldx #0
+@w511_page1:
+        txa
+        eor #$a4
+        sta CAP_REQUEST+$100,x
+        inx
+        cpx #$ff
+        bne @w511_page1
+        rts
+
+build_w512:
+        lda #1
+        sta CAP_REQUEST
+        lda #6
+        sta CAP_REQUEST+1
+        lda #0
+        sta CAP_REQUEST+2
+        lda #2
+        sta CAP_REQUEST+3
+        lda #$2e
+        sta CAP_REQUEST+4
+        lda #0
+        sta CAP_REQUEST+5
+        ldx #6
+@w512_page0:
+        txa
+        eor #$a5
+        sta CAP_REQUEST,x
+        inx
+        bne @w512_page0
+        ldx #0
+@w512_page1:
+        txa
+        eor #$a4
+        sta CAP_REQUEST+$100,x
+        inx
+        bne @w512_page1
+        rts
+
+verify_r512:
+        ldx #0
+@r512_header:
+        lda CAP_RESPONSE,x
+        cmp r_512_header_expected,x
+        capacity_bne_fail
+        inx
+        cpx #7
+        bne @r512_header
+        ldx #7
+@r512_page0:
+        txa
+        eor #$a5
+        cmp CAP_RESPONSE,x
+        capacity_bne_fail
+        inx
+        bne @r512_page0
+        ldx #0
+@r512_page1:
+        txa
+        eor #$a4
+        cmp CAP_RESPONSE+$100,x
+        capacity_bne_fail
+        inx
+        bne @r512_page1
+        rts
+ .endif
+
 success:
         lda #'N'
         sta RESULT
@@ -526,7 +912,11 @@ success:
         sta RESULT+3
         jmp done
 
-fail:   lda #'N'
+ .ifndef CAPACITY_BOUNDS
+fail:
+ .endif
+native_fail:
+        lda #'N'
         sta RESULT
         lda #'V'
         sta RESULT+1
@@ -587,3 +977,10 @@ p_idle_expected:  .byte 0, 0, 0
 request_expected: .byte 1, 2, 6, 0, 9, 0
 request_after_expected: .byte 1, 3, 6, 0, $0A, 0
 request_interrupted_expected: .byte 1, 4, 6, 0, $0B, 0
+ .ifdef CAPACITY_BOUNDS
+p_ready_7_expected: .byte 2, 7, 0
+p_ready_512_expected: .byte 2, 0, 2
+r_511_expected: .byte 1, 5, 7, 0, $0e, 1, 0
+r_bounded_error_expected: .byte 1, 7, 7, 0, $17, 1, 7
+r_512_header_expected: .byte 1, 6, 0, 2, $8b, 1, 0
+ .endif
