@@ -17,6 +17,9 @@ class PublicApiClockTests(unittest.TestCase):
         for forbidden in ("SIOV", "ddevic", "dcomnd", "dstats", "0x7f"):
             self.assertNotIn(forbidden, source)
         self.assertIn("fn_init()", source)
+        self.assertIn("fn_atari_query_capabilities()", source)
+        self.assertIn("fn_atari_capability_flags()", source)
+        self.assertNotIn("fn_atari_proc_notify", source)
         self.assertIn("fn_clock_get(&clock_value)", source)
         self.assertEqual(source.count("fn_raw_call(FN_DEVICE_FILE"), 3)
         self.assertIn("FNACCEPT_FILE_CMD_WRITE", source)
@@ -33,14 +36,34 @@ class PublicApiClockTests(unittest.TestCase):
             self.assertIn(call, source)
 
     def test_native_trace_requires_exact_clock_file_network_w_p_r_exchanges(self):
-        commands = ("57", "50", "52") * 11
+        commands = ("51",) + ("57", "50", "52") * 11
         trace = "\n".join(
             f"udp: Received 7 bytes: 02 7F {command} 00 00 CF {index:02X}"
             for index, command in enumerate(commands, start=1)
         )
+        trace = trace.replace("02 7F 51 00 00 CF", "02 7F 51 00 00 D0", 1)
         self.assertEqual(boot_runner._clock_native_commands(trace), list(commands))
         with self.assertRaises(RuntimeError):
             boot_runner._clock_native_commands(trace.replace(" 50 ", " 52 ", 1))
+
+    def test_capability_trace_requires_exact_q_reply_and_checksum(self):
+        trace = "\n".join((
+            "udp: Received 7 bytes: 02 7F 51 00 00 D0 01",
+            "udp: Sending 6 bytes: 81 01 01 41 00 00",
+            "udp: Sending 2 bytes: 01 43",
+            "udp: Sending 5 bytes: 02 01 00 02 00",
+            "udp: Sending 2 bytes: 01 03",
+            "udp: Received 7 bytes: 02 7F 57 06 00 DC 02",
+        ))
+        observed = boot_runner._validate_public_capability_trace(trace)
+        self.assertEqual(observed['payload'], '01 00 02 00')
+        self.assertEqual(observed['feature_flags'], '00')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_capability_trace(
+                trace.replace('02 01 00 02 00', '02 01 00 02 01'))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_capability_trace(
+                trace.replace('01 03', '01 04'))
 
     def test_rejected_file_w_relay_requires_bad_checksum_nak_and_direct_new_w(self):
         original = bytes((0x7f, ord('W'), 0x30, 0x00))

@@ -739,7 +739,50 @@ Live evidence:
   observed post-reset R/NAK pairs, P(IDLE) before the distinct W, literal FF
   ingress evidence, and separately inspected original/recovery backing files.
 
-Story 2.4 remains open only for PROC and embedded public-service acceptance.
+Story 2.4 remains open only for embedded public-service acceptance.
+
+## Public capability discovery and optional PROC reporting
+
+The Atari public archive now exposes the additive, Atari-only
+`fn_atari_capability_flags()` accessor alongside the existing explicit
+`fn_atari_query_capabilities()` and `fn_atari_max_payload()` calls.  It returns
+the fourth native-Q reply byte after a successful Q and is reset to zero by
+initialisation or any failed/invalid Q; `FN_ATARI_CAP_PROC` names bit 0 without
+altering any cross-platform API or transport path.  The assembled soft65c02
+test executes the production transport and proves the literal valid-Q feature
+byte is observable while every failed-Q path clears it.
+
+`fnaccept.xex` result block v7 performs exactly one explicit public Q after
+`fn_init()`, before its normal Clock/File/Network/Disk exchanges.  It records
+Q status, usable maximum payload, raw feature flags, and an explicit PROC
+outcome.  Production NetSIO responds with literal `01 00 02 00`; therefore the
+guest records status `$00`, maximum `$0200`, flags `$00`, and PROC
+`not-advertised` (`$01`).  This is accepted capability evidence, not a fake
+interrupt pass: the XEX neither installs a VPRCED handler nor calls
+`fn_atari_proc_notify()`, and it does not manufacture P(PENDING).
+
+The NetSIO runner independently requires one captured `7f 51 00 00 d0` Q frame
+followed by ACK, COMPLETE, the complete four-byte literal Q reply, and folded
+SIO checksum `$03`.  Negative focused tests corrupt the reply payload or its
+checksum and reject the observation.  Normal public service W/P/R traffic is
+then checked separately and remains real production-core traffic.
+
+Rebuilding the configuration ATR changed its pinned sector-4 literal because
+the versioned XEX grew.  The independent D1 fixture now pins the rebuilt full
+ATR SHA-256 `69f2e196924026b23f2a72b33156e65389d7c66fbc579be2b31063e4c3dafb22`
+and sector-4 checksum `$e6`; its source slice and projection manifest were
+updated together.  The direct D1 boot contract itself is unchanged.
+
+Fresh live evidence:
+
+- `test-evidence/atari-sio-public-api-clock-20261023-231410/` records `ADP!`,
+  continued execution, v7 result block values, the exact Q capture, and all
+  Clock/File/Network/Disk service evidence.
+- `test-evidence/atari-sio-public-api-{rejected-w-recovery-20261023-231427,malformed-r-recovery-20261023-231437,interrupted-r-recovery-20261023-231446,reset-recovery-20261023-231455}/`
+  refresh all four public recovery paths with the same Q result and then their
+  existing distinct-operation evidence.
+- `test-evidence/atari-sio-boot-20261023-231805/` preserves native and NetSIO
+  D1 page-6 `NIO!` boot evidence against the refreshed pinned ATR.
 
 ## Acceptance criteria
 

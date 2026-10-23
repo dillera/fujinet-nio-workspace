@@ -56,6 +56,8 @@ PUBLIC_API_RESULT = 0x0B00
 PUBLIC_API_CLOCK_TIME = PUBLIC_API_RESULT + 8
 PUBLIC_API_HEARTBEAT = PUBLIC_API_RESULT + 16
 PUBLIC_API_CLOCK_BYTES = bytes.fromhex('08 07 06 05 04 03 02 01')
+PUBLIC_API_CAPABILITY_REPLY = bytes((1, 0, 2, 0))
+PUBLIC_API_PROC_NOT_ADVERTISED = 1
 PUBLIC_API_FILE_WRITE_STATUS = PUBLIC_API_RESULT + 18
 PUBLIC_API_FILE_WRITE_DEVICE_STATUS = PUBLIC_API_RESULT + 19
 PUBLIC_API_FILE_WRITE_RESPONSE_LENGTH = PUBLIC_API_RESULT + 20
@@ -97,6 +99,10 @@ PUBLIC_API_FILE_RECOVERY_WRITE_COUNT = PUBLIC_API_RESULT + 80
 PUBLIC_API_FILE_RECOVERY_VERIFY = PUBLIC_API_RESULT + 82
 PUBLIC_API_FILE_FAILURE_STATUS = PUBLIC_API_RESULT + 83
 PUBLIC_API_FILE_RECOVERY_KIND = PUBLIC_API_RESULT + 84
+PUBLIC_API_CAPABILITY_STATUS = PUBLIC_API_RESULT + 85
+PUBLIC_API_CAPABILITY_MAX_PAYLOAD = PUBLIC_API_RESULT + 86
+PUBLIC_API_CAPABILITY_FLAGS = PUBLIC_API_RESULT + 88
+PUBLIC_API_PROC_RESULT = PUBLIC_API_RESULT + 89
 PUBLIC_API_MEMORY_SNAPSHOT = PUBLIC_API_RESULT + 0x60
 PUBLIC_API_MEMORY_MAGIC = PUBLIC_API_MEMORY_SNAPSHOT
 PUBLIC_API_MEMORY_VERSION = PUBLIC_API_MEMORY_SNAPSHOT + 4
@@ -1729,6 +1735,10 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                     'init_status': bridge.peek(PUBLIC_API_RESULT + 6, 1).hex(),
                     'clock_status': bridge.peek(PUBLIC_API_RESULT + 7, 1).hex(),
                     'clock_value': bridge.peek(PUBLIC_API_CLOCK_TIME, 8).hex(' '),
+                    'capability_status': bridge.peek(PUBLIC_API_CAPABILITY_STATUS, 1).hex(),
+                    'capability_max_payload': _read_u16(bridge, PUBLIC_API_CAPABILITY_MAX_PAYLOAD),
+                    'capability_flags': bridge.peek(PUBLIC_API_CAPABILITY_FLAGS, 1).hex(),
+                    'proc_result': bridge.peek(PUBLIC_API_PROC_RESULT, 1).hex(),
                     'file_write_status': bridge.peek(PUBLIC_API_FILE_WRITE_STATUS, 1).hex(),
                     'file_write_device_status': bridge.peek(PUBLIC_API_FILE_WRITE_DEVICE_STATUS, 1).hex(),
                     'file_write_response_length': _read_u16(bridge, PUBLIC_API_FILE_WRITE_RESPONSE_LENGTH),
@@ -1801,10 +1811,14 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if signature != b'ADP!':
                     raise RuntimeError(f"public API Clock/File/Network/Disk guest failed at stage {state['stage']}")
-                if state['version'] != '06' or state['stage'] != '0e':
+                if state['version'] != '07' or state['stage'] != '0f':
                     raise RuntimeError(f"public API Clock/File/Network/Disk guest has invalid result header: {state}")
                 if state['init_status'] != '00' or state['clock_status'] != '00':
                     raise RuntimeError(f"public API Clock call did not succeed: {state}")
+                if (state['capability_status'], state['capability_max_payload'],
+                    state['capability_flags'], state['proc_result']) != (
+                        '00', 512, '00', f'{PUBLIC_API_PROC_NOT_ADVERTISED:02x}'):
+                    raise RuntimeError(f"public API capability/PROC result mismatch: {state}")
                 if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
                     raise RuntimeError(f"public API Clock value mismatch: {state['clock_value']}")
                 if rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery or reset_recovery:
@@ -1856,10 +1870,33 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
 
 def _clock_native_commands(trace):
     commands = re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace)
-    expected = ['57', '50', '52'] * 11
+    expected = ['51'] + ['57', '50', '52'] * 11
     if commands != expected:
-        raise RuntimeError(f'public API Clock/File/Network/Disk native command order is {commands}, expected {expected}')
+        raise RuntimeError(f'public API capability/Clock/File/Network/Disk native command order is {commands}, expected {expected}')
     return commands
+
+
+def _validate_public_capability_trace(trace):
+    """Bind the public Q result block to real native-Q NetSIO traffic."""
+    command = 'udp: Received 7 bytes: 02 7F 51 00 00 D0'
+    if trace.count(command) != 1:
+        raise RuntimeError('public capability discovery did not issue exactly one native Q command')
+    start = trace.find(command)
+    next_command = trace.find('udp: Received 7 bytes: 02 7F ', start + len(command))
+    window = trace[start:next_command if next_command >= 0 else None]
+    payload = PUBLIC_API_CAPABILITY_REPLY.hex(' ').upper()
+    checksum = _sio_checksum(PUBLIC_API_CAPABILITY_REPLY)
+    if (not re.search(r'udp: Sending 6 bytes: 81 [0-9A-F]{2} 01 41 00 00', window) or
+            'udp: Sending 2 bytes: 01 43' not in window or
+            f'udp: Sending 5 bytes: 02 {payload}' not in window or
+            f'udp: Sending 2 bytes: 01 {checksum:02X}' not in window):
+        raise RuntimeError('public capability Q reply did not carry exact ACK/COMPLETE/four-byte payload/checksum')
+    return {
+        'command': '7f 51 00 00 d0',
+        'payload': PUBLIC_API_CAPABILITY_REPLY.hex(' '),
+        'checksum': f'{checksum:02x}',
+        'feature_flags': f'{PUBLIC_API_CAPABILITY_REPLY[3]:02x}',
+    }
 
 
 def _sio_checksum(data):
@@ -2176,6 +2213,7 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         altirra_log.flush()
         nio.flush()
         trace = (run / 'nio.log').read_text(errors='replace')
+        state['capability_wire'] = _validate_public_capability_trace(trace)
         state['native_commands'] = (_clock_native_commands(trace) if not (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery or reset_recovery) else
                                     re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace))
         if trace.count('ClockDevice routed request') != 1:
