@@ -70,6 +70,64 @@ class PublicApiClockTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._validate_rejected_file_w_relay(summary)
 
+    def test_ready_length_relay_requires_retained_response_drain_before_new_w(self):
+        def frame(command, aux=0):
+            value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))
+            return value + bytes((boot_runner._sio_checksum(value),))
+
+        # The initial accepted W/P is followed by one physical wrong-length
+        # R, then recovery P/R using the original length before distinct W.
+        original = bytes((2, 15, 0))
+        delivered = bytes((2, 14, 0))
+        def write_packet(uri, marker):
+            body = bytes((1, len(uri), 0)) + uri + b'\0\0\0\0' + bytes((len(marker), 0)) + marker
+            packet = bytearray((0xfe, 4, 6 + len(body), 0, 0, 0)) + body
+            packet[4] = boot_runner._sio_checksum(packet[:4] + packet[5:])
+            return bytes(packet)
+        initial_w = write_packet(boot_runner.PUBLIC_API_FILE_URI,
+                                 boot_runner.PUBLIC_API_FILE_MARKER)
+        distinct_w = write_packet(boot_runner.PUBLIC_API_FILE_RECOVERY_URI,
+                                  boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER)
+        recovery_reply = bytearray((0xfe, 4, 15, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0))
+        recovery_reply[4] = boot_runner._sio_checksum(recovery_reply[:4] + recovery_reply[5:])
+        summary = {
+            'failure': None,
+            'fault_applied': True,
+            'ready_payload': original.hex(' '),
+            'delivered_ready_payload': delivered.hex(' '),
+            'ready_checksums': {'original': boot_runner._sio_checksum(original),
+                                'delivered': boot_runner._sio_checksum(delivered)},
+            'recovery_ready_payload': original.hex(' '),
+            'recovery_ready_checksum': boot_runner._sio_checksum(original),
+            'wrong_r_attempts': [frame('R', 14).hex(' ')],
+            'wrong_r_naks': ['01 4e'],
+            'recovery_p_seen': True,
+            'recovery_r_seen': True,
+            'distinct_w_seen': True,
+            'command_frames': [frame('W', len(initial_w)).hex(' '), frame('P').hex(' '),
+                               frame('R', 14).hex(' '), frame('P').hex(' '),
+                               frame('R', 15).hex(' '), frame('W', len(distinct_w)).hex(' '),
+                               frame('P').hex(' '), frame('R', 15).hex(' ')],
+            'w_payloads': {'initial': initial_w.hex(' '), 'distinct': distinct_w.hex(' ')},
+            'w_checksums': {'initial': boot_runner._sio_checksum(initial_w),
+                            'distinct': boot_runner._sio_checksum(distinct_w)},
+            'recovery_r_payload': bytes(recovery_reply).hex(' '),
+            'recovery_r_checksum': boot_runner._sio_checksum(recovery_reply),
+        }
+        boot_runner._validate_ready_length_relay(summary)
+        # Negative: a new W before recovery R is unsafe and must fail.
+        summary['command_frames'][4] = frame('W', len(distinct_w)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_ready_length_relay(summary)
+        summary['command_frames'][4] = frame('R', 15).hex(' ')
+        summary['recovery_ready_payload'] = delivered.hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_ready_length_relay(summary)
+        summary['recovery_ready_payload'] = original.hex(' ')
+        summary['wrong_r_naks'] = ['01 41']
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_ready_length_relay(summary)
+
     def test_expected_cc65_clock_is_full_little_endian_eight_bytes(self):
         self.assertEqual(boot_runner.PUBLIC_API_CLOCK_BYTES,
                          bytes.fromhex("08 07 06 05 04 03 02 01"))

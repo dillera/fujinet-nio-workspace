@@ -571,9 +571,66 @@ Evidence and verification:
   native and NetSIO paths.
 
 The new configuration-ATR whole-image pin is
-`71b5a61003039b6e40701f8e5a110c2d369772d6fc0ad09ddecf4a5a3143618c`;
+`b6b9f12285482392c4a17351ca0b733bd1656aa64bcc8be6757a0fbaecacc718`;
 the independent literal D1 boot sectors remain unchanged.  Story 2.4 remains
 open and no further feature/recovery scenario was added by this hardening pass.
+
+## Malformed READY-length terminal-R recovery
+
+This increment closes the malformed/wrong-length terminal-R item only.  The
+public guest remains public-API-only: its initial `fn_raw_call()` File Write is
+accepted by the production endpoint, then a one-shot NetSIO carrier relay
+changes the *delivered* READY P length from 17 to 16 and recomputes that P
+packet's SIO checksum.  It neither implements a peer nor alters the frontend.
+The guest consequently uses the altered length for R; every physical OS retry
+receives a real endpoint NAK.  Its public call returns `FN_ERR_TRANSPORT`
+`($10)` and it makes one distinct File Write/Read call.  The native transport
+first performs P(READY, 17) and R(17) to drain the retained original reply,
+then sends the new W.  It does not replay the accepted side-effecting request.
+
+The live run uncovered and corrected a concrete common-library defect:
+`fn_raw_call()` used to replay all non-timeout exchange errors, including an
+Atari terminal-R transport failure.  It now retries only `FN_ERR_IO` short or
+corrupt FujiBus bodies.  The new host `raw_transport_retry_test` proves both
+that transport errors issue exactly one exchange and that the intentional
+short-body retry remains one retry.  This shared correction preserves the
+Atari recovery contract and is built for every supported library target.
+
+The version-6 result block records the initial failure status and recovery
+kind alongside the established service results.  The relay evidence records
+the literal five-byte command frames, both complete File W raw packets and SIO
+checksums, original/delivered P bytes and checksums, each wrong-R/NAK physical
+pair, retained P bytes/checksum, and the complete recovery-R raw packet and
+checksum before the first distinct W.  Its validator compares both W packets
+to independent File payload literals and verifies each DCB AUX against the
+captured packet length.  It rejects stale retained P bytes, an altered NAK, a
+wrong R AUX, a bad raw packet/checksum, a missing drain, or a W that precedes
+recovery R.  The focused unit test deliberately changes recovery order,
+retained P bytes, and NAK and requires failure.
+
+Live evidence:
+
+- `test-evidence/atari-sio-public-api-malformed-r-recovery-20261023-214820/`
+  records `ADP!`, one initial File write dispatch, 28 observed physical
+  wrong-R/real-NAK pairs (an observed OS retry count, not a requirement), a
+  retained P of `02 11 00`, recovery R AUX `$0011`, then a distinct File W.
+  The production trace contains exactly three FileDevice dispatches in
+  Write/Write/Read order.  The independently inspected backing store contains
+  the original marker once and the distinct recovery marker once.
+- `test-evidence/atari-sio-public-api-clock-20261023-214233/` and
+  `test-evidence/atari-sio-public-api-rejected-w-recovery-20261023-214242/`
+  retain the normal and rejected-W `ADP!` acceptance paths with the same
+  memory-layout gate and Graphics-0 display.
+- `test-evidence/atari-sio-boot-20261023-214326/` records the preserved D1
+  page-6 `NIO!` native and production-NetSIO boot gate.
+
+Verification performed: rebuilt the library/Atari archive and configuration
+ATR; ran all 45 Atari fixture/runner tests; ran all three live public-API
+paths; ran the D1 boot gate; and ran complete `repos/fujinet-nio-lib make
+check`, including all 123 assembled soft65c02 transport assertions and the
+new raw retry guard.  Accepted-but-interrupted R, reset, conditional PROC, and
+embedded-Altirra public-service acceptance remain open.  Story 2.4 is not
+complete.
 
 ## Acceptance criteria
 
