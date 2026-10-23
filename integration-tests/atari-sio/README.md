@@ -87,6 +87,17 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --native-wrong-r-retention-altirra-embedded --timeout 30
 ```
 
+The embedded reset projection pauses the same guest after its first READY
+poll, invokes the installed `fujinetnio` device's actual `ColdReset()` through
+the Altirra control bridge, then releases the guest.  It requires recorded
+lifecycle evidence as well as the post-reset P(IDLE), distinct W2 dispatch,
+terminal R, and final P(IDLE) POKEY trace.
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-reset-to-idle-altirra-embedded --timeout 30
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

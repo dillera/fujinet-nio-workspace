@@ -312,6 +312,72 @@ class VirtualProjectionTests(unittest.TestCase):
                 log.replace("udp: Sending 4 bytes: 02 00 00 00", "udp: Sending 4 bytes: 02 00 01 00", 1),
                 self.manifest)
 
+    def test_altirra_embedded_reset_to_idle_requires_lifecycle_idle_and_distinct_w(self):
+        def pokey(direction, value):
+            if direction == "Receive":
+                return f"[SIODATA] [  0] Receive      < ${value:02X}"
+            return f"[SIODATA] [  0] {direction:<8} ${value:02X} >"
+
+        frames = (
+            bytes.fromhex("7f 51 00 00 d0"), bytes.fromhex("7f 57 06 00 dc"),
+            bytes.fromhex("7f 50 00 00 cf"), bytes.fromhex("7f 50 00 00 cf"),
+            bytes.fromhex("7f 57 06 00 dc"), bytes.fromhex("7f 50 00 00 cf"),
+            bytes.fromhex("7f 52 09 00 da"), bytes.fromhex("7f 50 00 00 cf"),
+        )
+        replies = (
+            b"AC\x01\x00\x02\x00\x03", b"AAC", b"AC\x02\x09\x00\x0b",
+            b"AC\x00\x00\x00\x00", b"AAC", b"AC\x02\x09\x00\x0b",
+            bytes.fromhex("41 43 01 03 09 00 0e 01 00 33 cc 1c"),
+            b"AC\x00\x00\x00\x00",
+        )
+        data = {
+            1: bytes.fromhex("01 02 06 00 09 00 12"),
+            4: bytes.fromhex("01 03 06 00 0a 00 14"),
+        }
+        lines = []
+        for index, (frame, reply) in enumerate(zip(frames, replies)):
+            lines.extend(pokey("SendCmd", value) for value in frame)
+            lines.extend(pokey("Send", value) for value in data.get(index, b""))
+            lines.extend(pokey("Receive", value) for value in reply)
+        trace = "\n".join(lines) + "\n"
+        core_log = "\n".join((
+            "[fujinetnio-projection] core dispatch fixture route invocation 1",
+            "[fujinetnio] embedded FujiNet-NIO device ColdReset",
+            "[fujinetnio-projection] core dispatch fixture route invocation 2",
+        )) + "\n"
+        observed = projection.compare_altirra_embedded_native_reset_to_idle(
+            trace, core_log, self.manifest)
+        self.assertEqual([entry["fixture"] for entry in observed], [
+            "q-idle", "w-core-dispatch", "p-core-dispatch-ready", "reset-clears",
+            "w-core-dispatch-after-reset", "p-core-dispatch-ready",
+            "r-core-dispatch-after-reset", "reset-clears",
+        ])
+        self.assertEqual(observed[6]["response"]["payload"], "01 03 09 00 0e 01 00 33 cc")
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_reset_to_idle(
+                boot_runner._embedded_replace_response(
+                    trace, bytes.fromhex("7f 50 00 00 cf"), 1, b"AC\x02\x09\x00\x0b"),
+                core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_reset_to_idle(
+                boot_runner._embedded_replace_w_data(
+                    trace, 1, bytes.fromhex("01 02 06 00 09 00"), 0x12),
+                core_log, self.manifest)
+        run = {
+            "siov_statuses": "01 01 01 01 01 01 01 01",
+            "p_ready": "02 09 00", "post_reset_idle": "00 00 00",
+            "post_reset_ready": "02 09 00",
+            "post_reset_reply": "01 03 09 00 0e 01 00 33 cc",
+            "post_reset_terminal_idle": "00 00 00",
+            "reset_event": {"kind": "altirra-embedded-device-cold-reset", "lifecycle": "cold",
+                            "tag": "fujinetnio", "path": "/fujinetnio",
+                            "guest_step_before_reset": 4},
+        }
+        boot_runner._assert_embedded_reset_to_idle_guest_state(run)
+        run.pop("reset_event")
+        with self.assertRaises(RuntimeError):
+            boot_runner._assert_embedded_reset_to_idle_guest_state(run)
+
     def test_interrupted_r_fixture_sequence_and_guest_failure_check(self):
         self.assertEqual(projection.native_projection_fixture_ids(
             "native-interrupted-r-recovery", self.manifest), [

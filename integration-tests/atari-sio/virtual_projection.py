@@ -518,7 +518,8 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
     real RoutingManager invocation; all command and reply bytes are compared
     to the independent literal fixture.
     """
-    if projection_id not in {"native-core-dispatch", "native-wrong-r-retention"}:
+    if projection_id not in {"native-core-dispatch", "native-wrong-r-retention",
+                             "native-reset-to-idle"}:
         raise ProjectionError(f"{projection_id}: no embedded projection comparison is implemented")
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
@@ -526,9 +527,10 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
     ids = native_projection_fixture_ids(projection_id, manifest)
     dispatches = [int(value) for value in re.findall(
         r"core dispatch fixture route invocation (\d+)", altirra_log)]
-    if dispatches != [1]:
+    expected_dispatches = [1, 2] if projection_id == "native-reset-to-idle" else [1]
+    if dispatches != expected_dispatches:
         raise ProjectionMismatch(
-            f"{projection_id}: expected exactly one embedded real-core dispatch, "
+            f"{projection_id}: expected embedded real-core dispatches {expected_dispatches}, "
             f"observed {dispatches}")
 
     events = _embedded_sio_events(pokey_log)
@@ -633,6 +635,13 @@ def compare_altirra_embedded_native_wrong_r_retention(pokey_log, altirra_log,
     """Byte-verify retained response state after one or more rejected R attempts."""
     return compare_altirra_embedded_native_projection(
         pokey_log, altirra_log, "native-wrong-r-retention", manifest, fixture_data)
+
+
+def compare_altirra_embedded_native_reset_to_idle(pokey_log, altirra_log,
+                                                   manifest=None, fixture_data=None):
+    """Byte-verify embedded reset-to-idle with distinct post-reset dispatch."""
+    return compare_altirra_embedded_native_projection(
+        pokey_log, altirra_log, "native-reset-to-idle", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):
