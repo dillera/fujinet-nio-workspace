@@ -571,7 +571,7 @@ Evidence and verification:
   native and NetSIO paths.
 
 The new configuration-ATR whole-image pin is
-`b6b9f12285482392c4a17351ca0b733bd1656aa64bcc8be6757a0fbaecacc718`;
+`939d3c38cbca3d4db706a6ef109d84229a7103a192135b11075efb476ee8b85b`;
 the independent literal D1 boot sectors remain unchanged.  Story 2.4 remains
 open and no further feature/recovery scenario was added by this hardening pass.
 
@@ -631,6 +631,43 @@ check`, including all 123 assembled soft65c02 transport assertions and the
 new raw retry guard.  Accepted-but-interrupted R, reset, conditional PROC, and
 embedded-Altirra public-service acceptance remain open.  Story 2.4 is not
 complete.
+
+## Generic raw-call replay hardening
+
+The first no-replay correction stopped `FN_ERR_TRANSPORT` replay.  A follow-up
+audit found that the generic `fn_raw_call()` still replayed the entire request
+once for `FN_ERR_IO`.  That error is not evidence that the device rejected W:
+it is produced after a completed exchange for a short/truncated reply,
+wrong response device/command, checksum failure, or caller response-capacity
+failure.  Packet parsing can additionally return `FN_ERR_INVALID` for a
+malformed declared length.  Each outcome is ambiguous for a side-effecting
+operation, so the generic API now performs exactly one exchange and returns
+the observed error without replaying the application request.
+
+`tests/raw_transport_retry_test.c` now proves exactly one exchange for
+transport error, truncated reply, malformed length, mismatched identity,
+checksum-corrupt packet, and insufficient caller capacity, plus one exchange
+for a valid successful response.  This is common code and was compiled under
+the full all-target library check; it introduces no API or ABI change.  The
+packet-native Atari transport still owns outstanding-response draining before
+a later distinct public call.
+
+Fresh live evidence retains all public acceptance behavior:
+
+- `test-evidence/atari-sio-public-api-malformed-r-recovery-20261023-220309/`
+  proves the retained response is drained before the distinct File write.
+- `test-evidence/atari-sio-public-api-rejected-w-recovery-20261023-220319/`
+  proves a rejected W starts its distinct operation directly.
+- `test-evidence/atari-sio-public-api-clock-20261023-220328/` preserves normal
+  Clock/File/Network/Disk acceptance.
+- `test-evidence/atari-sio-boot-20261023-220700/` freshly preserves the D1
+  page-6 `NIO!` native and production-NetSIO boot gate with the rebuilt ATR.
+
+The configuration ATR pin above reflects this library change.  The fixture
+validator, focused public runner tests, fresh live public paths, fresh D1 boot
+gate, and complete all-target `repos/fujinet-nio-lib make check` pass.
+Interrupted-R, reset, PROC, and embedded public-service acceptance remain
+deliberately out of scope.
 
 ## Acceptance criteria
 
