@@ -800,6 +800,45 @@ Fresh live evidence:
 5. No legacy `$71`, SLIP, padded reads, application SIO framing, alternate
    boot pipeline, or replacement core/endpoint can satisfy this story.
 
+## Embedded AltirraSDL public-API acceptance
+
+The existing `fnaccept.xex` and configuration-ATR launch path now also run
+through AltirraSDL's embedded `fujinetnio` device, with no NetSIO hub or
+endpoint process.  A test-only, opt-in `publicacceptancefixture` setting
+composes the existing production `FujinetCore`, `AtariSioNioFrontend`,
+ClockDevice, FileDevice, NetworkDevice and DiskDevice.  It freezes only the
+acceptance ClockDevice's POSIX test clock at `0807060504030201`, registers a
+deterministic `fixture://nio-accept` protocol with the real NetworkDevice,
+and creates/mounts the writable 128-byte-sector ATR in DiskDevice slot 2.
+Normal embedded-device operation is unchanged; the setting is mutually
+exclusive with the already test-only projection fixture.
+
+The frontend is still constructed with the real routing manager.  An
+evidence-only wrapper logs the actual Clock/File/Network/Disk dispatch counts
+without owning either packet parsing or SIO framing.  The focused Altirra
+SIO CTest now constructs this composition through the real `IATDeviceSIO`
+callbacks.  The live runner captures POKEY command/data/response bytes and
+requires exactly one literal Q followed by the 11 W/P/R public-service
+exchanges.  It checks every command and data checksum, AUX and packet length,
+all Q/W/P/R control ordering, complete raw FujiBus packet checksums, Clock,
+File, Network and 128-byte Disk values, real dispatch counts, persistent File
+contents, changed Disk LBA 5, and untouched neighbouring sectors.  The
+existing result inspection additionally requires `ADP!`, v7/stage `$0f`, all
+four service stages, advancing heartbeat, the memory-layout gate, Q flags
+`$00`, and PROC `not-advertised` (`$01`).
+
+Fresh independent embedded evidence:
+
+- `test-evidence/atari-sio-public-api-clock-altirra-embedded-20261023-233529/`
+  records guest RAM inspection, screenshot, Altirra diagnostics, complete
+  POKEY capture, per-operation observations, real-core dispatch logs, and
+  independent File/ATR backing-store inspection.
+
+Verification included the focused embedded CTest, the live embedded public
+acceptance, the Python Atari fixture/runner suite, the existing NetSIO normal
+public acceptance, the full library `make check`, and the D1 page-6 boot gate.
+Story 2.4 remains open: only embedded fault-injection recovery is deferred.
+
 ## Out of scope
 
 Native BASIC `N:` installation/CIO behavior (Story 2.5), firmware endpoint or
