@@ -468,6 +468,113 @@ Malformed/wrong-length R, accepted-but-interrupted R, device-reset recovery,
 conditional PROC, and embedded-Altirra public-service acceptance remain open;
 this increment does not mark Story 2.4 complete.
 
+## Memory-layout investigation and hardening
+
+This focused hardening pass pauses further Story 2.4 feature work.  It reviews
+the generated `fnaccept.map`, `fnaccept.lbl`, C listing, linker configuration,
+and live guest state rather than inferring safety from the linker ceiling.
+
+### Measured layout
+
+The accepted `fnaccept` link is deliberately separate from ordinary Atari
+utilities and starts at `$0d00`, immediately above the fixed result/disk
+windows.  The generated map reports these exact half-open ranges:
+
+| Region | Range | Bytes |
+| --- | --- | ---: |
+| zero page | `$0082`--`$009c` | 26 |
+| STARTUP | `$0d00`--`$0d63` | 99 |
+| LOWBSS / LOWCODE / INIT | absent | 0 / 0 / 0 |
+| CODE | `$0d6f`--`$565e` | 18,671 |
+| RODATA | `$565e`--`$570f` | 177 |
+| DATA | `$570f`--`$5740` | 49 |
+| BSS | `$5740`--`$5ee2` | 1,954 |
+
+The XEX is 19,020 bytes on disk; its contiguous loaded span is 19,008 bytes
+and loaded-plus-BSS footprint is 20,962 bytes.  The `cc65-atari-nio.cfg`
+reserves 2,048 C-stack bytes.  In the measured configuration this stack is
+`$941f`--`$9c1f`, leaving a 13,629-byte no-heap gap between BSS and the stack
+floor.  `fnaccept` and its selected archive members do not link `malloc` or
+use a dynamic heap; the gap is a guard, not an advertised allocation surface.
+
+The result record remains `$0b00`--`$0b80`; its two fixed 128-byte Disk API
+buffers are `$0b80`--`$0c00` and `$0c00`--`$0c80`.  All are above the measured
+MEMLO and below the XEX start.  The app's ordinary static buffers are 96-byte
+File request, 64-byte File reply, and 32-byte Network reply.  Disk's two
+sector buffers are the fixed 128-byte windows, not BSS.
+
+The dominant linked contributors are the acceptance application (5,023 CODE,
+154 RODATA, 192 BSS), public-library `fn_disk.o` (2,708 CODE), `fn_rw.o`
+(1,505 CODE), `fn_state.o` (1,217 BSS plus 267 CODE), `fn_open.o` (1,255
+CODE), and Atari `fn_transport.o` (528 BSS plus 563 CODE).  The selected
+library totals 12,523 CODE, 23 RODATA, 8 DATA, and 1,757 BSS; cc65 runtime
+totals 1,125 CODE, 41 DATA, and 5 BSS.  The shared library state is exactly
+two 512-byte packet buffers, 28 bytes of sessions, 128-byte TCP URL scratch,
+10-byte transport context, 27-byte parse context, and the transport's
+512-byte recovery discard buffer plus 16 control bytes.  No duplicate packet
+pair was found.
+
+The largest storage symbols are therefore `_fn_req_buf` at `$581c` and
+`_fn_resp_buf` at `$5a1c` (512 bytes each), the transport discard buffer
+(512 bytes within its `$5ccd`--`$5edd` allocation), `_fn_tcp_url` at `$5c1c`
+(128 bytes), and the application File request/reply/Network reply block at
+`$5740`--`$5800` (96/64/32 bytes).  The public Disk transfer windows are the
+separate `$0b80` and `$0c00` fixed addresses.  Code is dominated by the
+acceptance application's `_main` module and the selected Disk/Read-Write/Open
+library modules listed above; cc65's `start`, `zerobss`, stack helpers and
+copy/string routines together account for the 1,125-byte runtime total.
+
+One concrete excess was found and removed: the generic app rule had linked
+the unused interactive `fnsvc.o` and `fnctl.o` into `fnaccept`, adding 6,462
+bytes of code and 1,588 BSS bytes.  The acceptance guest
+uses public `fujinet-nio-lib` calls directly, so its narrow link now excludes
+only those two helpers while leaving every other application unchanged.
+
+### Runtime proof and collision result
+
+The guest records a versioned memory snapshot in its existing result block
+before any service operation, DMA modification, or intentional memory
+relocation.  Live normal and rejected-W runs report MEMLO `$0700`, MEMTOP
+`$9c1f`, RAMTOP `$a0`, SDLSTL `$9c20`, SAVMSC `$9c40`, SDMCTL `$22`, and
+DMACTL `$ff`.  Thus the default 32-byte display list is `$9c20`--`$9c40` and
+the 960-byte Graphics-0 screen is `$9c40`--`$a000`; neither overlaps the
+linked image ending `$5ee2`.  The stack's last address is immediately below
+the display list, as the Atari OS memory map intends.
+
+This disproved the prior `$1d00`/headless rationale: its BSS reached `$9f97`
+while the real guest's MEMTOP was only `$9c1f`, so it overlapped both active
+display memory and the C stack.  Disabling ANTIC in `main()` was also too late
+to protect cc65's pre-main BSS clear.  The accepted fix is not a cosmetic
+display restoration: it restores the documented OS reservation layout, makes
+no DMA writes, and preserves the normal empty Graphics-0 screen without
+reopening `E:`.
+
+`integration-tests/atari-sio/fnaccept_memory_layout.py` is the executable
+map gate.  It rejects a start/range outside the approved regions, zero-page
+escape, BSS/stack collision, inadequate guard gap, result/disk window
+collision, or accidental `fnsvc`/`fnctl` linkage.  The live runner additionally
+rejects missing/changed pre-service snapshot data or any linked overlap with
+the active display list/screen.  Its focused unittest has negative snapshot
+mutations for both an unproven transition and a stack collision.
+
+Evidence and verification:
+
+- `test-evidence/atari-sio-public-api-clock-20261023-210551/` and
+  `test-evidence/atari-sio-public-api-rejected-w-recovery-20261023-210600/`
+  show `ADP!`, the same measured safe memory map, preserved normal and
+  rejected-W semantics, and stable Graphics-0 screenshots.
+- Rebuilt the Atari XEX/configuration ATR and ran the layout gate, focused
+  public/memory tests, and the full 43-test Atari fixture/runner suite.
+- Complete `repos/fujinet-nio-lib make check` passed, including assembled
+  Atari transport execution coverage; the D1 page-6 regression at
+  `test-evidence/atari-sio-boot-20261023-210020/` reaches `NIO!` through both
+  native and NetSIO paths.
+
+The new configuration-ATR whole-image pin is
+`71b5a61003039b6e40701f8e5a110c2d369772d6fc0ad09ddecf4a5a3143618c`;
+the independent literal D1 boot sectors remain unchanged.  Story 2.4 remains
+open and no further feature/recovery scenario was added by this hardening pass.
+
 ## Acceptance criteria
 
 1. A configuration-ATR cc65 XEX built from the normal pipeline proves Clock,

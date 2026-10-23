@@ -22,8 +22,8 @@ class PublicApiClockTests(unittest.TestCase):
         self.assertIn("FNACCEPT_FILE_CMD_READ", source)
         self.assertIn("persist:///fnaccept-v1.bin", source)
         self.assertIn("persist:///fnaccept-recovered-v1.bin", source)
-        self.assertIn("*sdmctl = 0", source)
-        self.assertIn("*dmactl = 0", source)
+        self.assertIn("capture_memory_snapshot()", source)
+        self.assertNotIn("*dmactl", source)
         for call in ("fn_open(&network_handle", "fn_write(network_handle", "fn_read(network_handle", "fn_close(network_handle"):
             self.assertIn(call, source)
         self.assertIn("fixture://nio-accept", source)

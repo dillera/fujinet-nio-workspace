@@ -17,6 +17,7 @@ from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_altirra_embedded_native_capacity_bounds,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
+from fnaccept_memory_layout import layout_report, validate_runtime_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
@@ -94,6 +95,17 @@ PUBLIC_API_FILE_RECOVERY_WRITE_DEVICE_STATUS = PUBLIC_API_RESULT + 77
 PUBLIC_API_FILE_RECOVERY_WRITE_RESPONSE_LENGTH = PUBLIC_API_RESULT + 78
 PUBLIC_API_FILE_RECOVERY_WRITE_COUNT = PUBLIC_API_RESULT + 80
 PUBLIC_API_FILE_RECOVERY_VERIFY = PUBLIC_API_RESULT + 82
+PUBLIC_API_MEMORY_SNAPSHOT = PUBLIC_API_RESULT + 0x60
+PUBLIC_API_MEMORY_MAGIC = PUBLIC_API_MEMORY_SNAPSHOT
+PUBLIC_API_MEMORY_VERSION = PUBLIC_API_MEMORY_SNAPSHOT + 4
+PUBLIC_API_PRE_MEMLO = PUBLIC_API_MEMORY_SNAPSHOT + 5
+PUBLIC_API_PRE_MEMTOP = PUBLIC_API_MEMORY_SNAPSHOT + 7
+PUBLIC_API_PRE_RAMTOP = PUBLIC_API_MEMORY_SNAPSHOT + 9
+PUBLIC_API_PRE_SDLSTL = PUBLIC_API_MEMORY_SNAPSHOT + 10
+PUBLIC_API_PRE_SAVMSC = PUBLIC_API_MEMORY_SNAPSHOT + 12
+PUBLIC_API_PRE_SDMCTL = PUBLIC_API_MEMORY_SNAPSHOT + 14
+PUBLIC_API_PRE_DMACTL = PUBLIC_API_MEMORY_SNAPSHOT + 15
+PUBLIC_API_HEADLESS_PROOF = PUBLIC_API_MEMORY_SNAPSHOT + 16
 PUBLIC_API_FILE_URI = b'persist:///fnaccept-v1.bin'
 PUBLIC_API_FILE_MARKER = b'ATARI-FILE-24'
 PUBLIC_API_FILE_NAME = 'fnaccept-v1.bin'
@@ -1110,6 +1122,18 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                     'disk_write_length': _read_u16(bridge, PUBLIC_API_DISK_WRITE_LENGTH),
                     'disk_read_length': _read_u16(bridge, PUBLIC_API_DISK_READ_LENGTH),
                     'disk_verify': bridge.peek(PUBLIC_API_DISK_VERIFY, 1).hex(),
+                    'memory_pre_dma': {
+                        'magic': bridge.peek(PUBLIC_API_MEMORY_MAGIC, 4).decode('ascii', 'replace'),
+                        'version': bridge.peek(PUBLIC_API_MEMORY_VERSION, 1)[0],
+                        'memlo': _read_u16(bridge, PUBLIC_API_PRE_MEMLO),
+                        'memtop': _read_u16(bridge, PUBLIC_API_PRE_MEMTOP),
+                        'ramtop': bridge.peek(PUBLIC_API_PRE_RAMTOP, 1)[0],
+                        'sdlstl': _read_u16(bridge, PUBLIC_API_PRE_SDLSTL),
+                        'savmsc': _read_u16(bridge, PUBLIC_API_PRE_SAVMSC),
+                        'sdmctl': bridge.peek(PUBLIC_API_PRE_SDMCTL, 1)[0],
+                        'dmactl': bridge.peek(PUBLIC_API_PRE_DMACTL, 1)[0],
+                        'dma_transition': bridge.peek(PUBLIC_API_HEADLESS_PROOF, 1)[0],
+                    },
                 }
                 heartbeats = []
                 for _ in range(4):
@@ -1117,6 +1141,11 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                     time.sleep(.02)
                 state['heartbeats'] = heartbeats
                 state['continued_execution'] = len(set(heartbeats)) > 1
+                memory_report = layout_report(
+                    ROOT / 'repos/nio-core-apps/build/atari/bin/fnaccept.map',
+                    PUBLIC_API_CLOCK_XEX)
+                state['memory_safety'] = validate_runtime_snapshot(
+                    state['memory_pre_dma'], memory_report)
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if signature != b'ADP!':
