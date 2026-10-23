@@ -2329,8 +2329,152 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         stop(ps)
 
 
-def _validate_embedded_public_api_trace(pokey, rejected_w_recovery=False):
+def _validate_embedded_malformed_r_public_api_trace(pokey):
+    """Verify public malformed-READY recovery from Altirra's actual POKEY wire."""
+    windows = _embedded_native_windows(pokey)
+    commands = [window[0] for window in windows]
+    if any(frame[0] != 0x7f or _sio_checksum(frame[:4]) != frame[4] for frame in commands):
+        raise RuntimeError('embedded malformed-R capture contains an invalid native command checksum')
+
+    def window_bytes(window):
+        command, begin, end = window
+        text = pokey[begin:end]
+        sent = bytes(int(value, 16) for value in re.findall(r"\bSend\s+\$([0-9A-F]{2})", text))
+        received = bytes(int(value, 16) for value in re.findall(r"Receive\s+< \$([0-9A-F]{2})", text))
+        return command, sent, received
+
+    def require_exchange(start, service, operation):
+        write = window_bytes(windows[start])
+        poll = window_bytes(windows[start + 1])
+        read = window_bytes(windows[start + 2])
+        command, sent, received = write
+        if command[1] != ord('W') or received != b'AAC':
+            raise RuntimeError(f'embedded malformed-R operation {operation} lacks exact W ACK/ACK/COMPLETE')
+        length = command[2] | (command[3] << 8)
+        if len(sent) != length + 1 or not sent or sent[-1] != _sio_checksum(sent[:-1]):
+            raise RuntimeError(f'embedded malformed-R operation {operation} W data length/checksum mismatch')
+        packet = sent[:-1]
+        if (len(packet) != length or len(packet) < 5 or
+                (packet[2] | (packet[3] << 8)) != len(packet) or
+                packet[4] != _sio_checksum(packet[:4] + packet[5:]) or
+                packet[:2] != bytes(service)):
+            raise RuntimeError(f'embedded malformed-R operation {operation} raw FujiBus W is invalid')
+        p_command, p_sent, p_received = poll
+        if (p_command != bytes.fromhex('7f 50 00 00 cf') or p_sent or len(p_received) != 6 or
+                p_received[:3] != b'AC\x02' or
+                p_received[-1] != _sio_checksum(p_received[2:-1])):
+            raise RuntimeError(f'embedded malformed-R operation {operation} P reply is malformed')
+        r_command, r_sent, r_received = read
+        reply_length = p_received[3] | (p_received[4] << 8)
+        if (r_command[1] != ord('R') or r_sent or
+                (r_command[2] | (r_command[3] << 8)) != reply_length or
+                len(r_received) != reply_length + 3 or r_received[:2] != b'AC' or
+                r_received[-1] != _sio_checksum(r_received[2:-1])):
+            raise RuntimeError(f'embedded malformed-R operation {operation} R length/checksum mismatch')
+        reply = r_received[2:-1]
+        if (len(reply) < 5 or (reply[2] | (reply[3] << 8)) != len(reply) or
+                reply[4] != _sio_checksum(reply[:4] + reply[5:]) or reply[:2] != bytes(service)):
+            raise RuntimeError(f'embedded malformed-R operation {operation} raw FujiBus R is invalid')
+        return packet, reply, [
+            {'command': command.hex(' '), 'sent': sent.hex(' '), 'received': received.hex(' ')},
+            {'command': p_command.hex(' '), 'sent': '', 'received': p_received.hex(' ')},
+            {'command': r_command.hex(' '), 'sent': '', 'received': r_received.hex(' ')},
+        ]
+
+    if len(commands) < 9 or [frame[1] for frame in commands[:6]] != [
+            ord('Q'), ord('W'), ord('P'), ord('R'), ord('W'), ord('P')]:
+        raise RuntimeError('embedded malformed-R capture lacks Q, Clock exchange, and initial File W/P')
+    q_command, q_sent, q_received = window_bytes(windows[0])
+    if (q_command != bytes.fromhex('7f 51 00 00 d0') or q_sent or
+            q_received != b'AC' + PUBLIC_API_CAPABILITY_REPLY +
+            bytes((_sio_checksum(PUBLIC_API_CAPABILITY_REPLY),))):
+        raise RuntimeError('embedded malformed-R capability Q is not an exact native-v1 exchange')
+    clock_packet, clock_reply, observed = require_exchange(1, (0x45, 0x01), 0)
+    if not clock_reply.endswith(PUBLIC_API_CLOCK_BYTES):
+        raise RuntimeError('embedded malformed-R Clock reply is not literal')
+
+    initial_command, initial_sent, initial_received = window_bytes(windows[4])
+    initial_packet = _file_write_packet(PUBLIC_API_FILE_URI, PUBLIC_API_FILE_MARKER)
+    if (initial_command != bytes.fromhex('7f 57 36 00 0d') or
+            initial_sent != initial_packet + bytes((_sio_checksum(initial_packet),)) or
+            initial_received != b'AAC'):
+        raise RuntimeError('embedded malformed-R initial File W was not accepted literally')
+    p_command, p_sent, p_received = window_bytes(windows[5])
+    original_response = _file_write_response(PUBLIC_API_FILE_MARKER)
+    original_length = len(original_response)
+    delivered_length = original_length - 1
+    delivered_ready = bytes((2, delivered_length & 0xff, delivered_length >> 8))
+    if (p_command != bytes.fromhex('7f 50 00 00 cf') or p_sent or
+            p_received != b'AC' + delivered_ready + bytes((_sio_checksum(delivered_ready),))):
+        raise RuntimeError('embedded malformed-R P did not deliver exactly the decremented READY length')
+    observed.insert(0, {'command': q_command.hex(' '), 'sent': '', 'received': q_received.hex(' ')})
+    observed.extend((
+        {'command': initial_command.hex(' '), 'sent': initial_sent.hex(' '),
+         'received': initial_received.hex(' ')},
+        {'command': p_command.hex(' '), 'sent': '', 'received': p_received.hex(' ')},
+    ))
+
+    cursor = 6
+    wrong_r_count = 0
+    while cursor < len(windows) and windows[cursor][0][1] == ord('R'):
+        command, sent, received = window_bytes(windows[cursor])
+        if (sent or (command[2] | (command[3] << 8)) != delivered_length or received != b'N'):
+            raise RuntimeError('embedded malformed-R wrong terminal R was not a physical NAK')
+        observed.append({'command': command.hex(' '), 'sent': '', 'received': received.hex(' ')})
+        wrong_r_count += 1
+        cursor += 1
+    if not wrong_r_count or cursor + 1 >= len(windows):
+        raise RuntimeError('embedded malformed-R capture lacks wrong-R retries and retained-response recovery')
+    recovery_p, recovery_p_sent, recovery_p_received = window_bytes(windows[cursor])
+    original_ready = bytes((2, original_length & 0xff, original_length >> 8))
+    if (recovery_p != bytes.fromhex('7f 50 00 00 cf') or recovery_p_sent or
+            recovery_p_received != b'AC' + original_ready + bytes((_sio_checksum(original_ready),))):
+        raise RuntimeError('embedded malformed-R retained P did not restore the original READY length')
+    recovery_r, recovery_r_sent, recovery_r_received = window_bytes(windows[cursor + 1])
+    if (recovery_r[1] != ord('R') or recovery_r_sent or
+            (recovery_r[2] | (recovery_r[3] << 8)) != original_length or
+            recovery_r_received != b'AC' + original_response + bytes((_sio_checksum(original_response),))):
+        raise RuntimeError('embedded malformed-R retained response was not drained by exact terminal R')
+    observed.extend((
+        {'command': recovery_p.hex(' '), 'sent': '', 'received': recovery_p_received.hex(' ')},
+        {'command': recovery_r.hex(' '), 'sent': '', 'received': recovery_r_received.hex(' ')},
+    ))
+    cursor += 2
+    expected_services = [
+        (0xfe, 0x04), (0xfe, 0x03),
+        (0xfd, 0x01), (0xfd, 0x03), (0xfd, 0x02), (0xfd, 0x04),
+        (0xfc, 0x05), (0xfc, 0x04), (0xfc, 0x0e), (0xfc, 0x03),
+    ]
+    if len(windows) != cursor + len(expected_services) * 3:
+        raise RuntimeError('embedded malformed-R capture has extra, missing, or reordered native commands')
+    writes = [initial_packet]
+    replies = [original_response]
+    for operation, service in enumerate(expected_services, start=1):
+        packet, reply, exchange = require_exchange(cursor + (operation - 1) * 3, service, operation)
+        writes.append(packet)
+        replies.append(reply)
+        observed.extend(exchange)
+    if (writes[1] != _file_write_packet(PUBLIC_API_FILE_RECOVERY_URI,
+                                        PUBLIC_API_FILE_RECOVERY_MARKER) or
+            PUBLIC_API_FILE_RECOVERY_URI not in writes[2] or
+            PUBLIC_API_FILE_MARKER not in writes[0] or
+            PUBLIC_API_FILE_RECOVERY_MARKER not in replies[2] or
+            PUBLIC_API_NETWORK_URI not in writes[3] or
+            PUBLIC_API_NETWORK_WRITE_MARKER not in writes[4] or
+            PUBLIC_API_NETWORK_REPLY_BYTES not in replies[5] or
+            writes[8][-PUBLIC_API_DISK_SECTOR_BYTES:] != PUBLIC_API_DISK_PATTERN or
+            replies[10][-PUBLIC_API_DISK_SECTOR_BYTES:] != PUBLIC_API_DISK_PATTERN):
+        raise RuntimeError('embedded malformed-R capture does not carry literal service data')
+    return observed
+
+
+def _validate_embedded_public_api_trace(pokey, rejected_w_recovery=False,
+                                        malformed_r_recovery=False):
     """Verify every public-service native frame from Altirra's real POKEY path."""
+    if rejected_w_recovery and malformed_r_recovery:
+        raise ValueError('embedded public recovery modes are mutually exclusive')
+    if malformed_r_recovery:
+        return _validate_embedded_malformed_r_public_api_trace(pokey)
     windows = _embedded_native_windows(pokey)
     commands = [window[0] for window in windows]
     expected_commands = [ord('Q')] + [value for _ in range(11)
@@ -2451,11 +2595,11 @@ def _validate_embedded_public_api_trace(pokey, rejected_w_recovery=False):
     return observed
 
 
-def _validate_embedded_public_core_log(trace):
+def _validate_embedded_public_core_log(trace, retained_ready_recovery=False):
     """Require the embedded wrapper's real RoutingManager dispatch evidence."""
     expected = (
         ('ClockDevice routed request', 1),
-        ('FileDevice routed request', 2),
+        ('FileDevice routed request', 3 if retained_ready_recovery else 2),
         ('NetworkDevice routed request', 4),
         ('DiskDevice routed request', 4),
     )
@@ -2464,7 +2608,9 @@ def _validate_embedded_public_core_log(trace):
             raise RuntimeError(f'embedded public acceptance expected {count} {marker} entries')
     exact = (
         'FileDevice routed request 1 command=4',
-        'FileDevice routed request 2 command=3',
+        ('FileDevice routed request 2 command=4' if retained_ready_recovery
+         else 'FileDevice routed request 2 command=3'),
+        ('FileDevice routed request 3 command=3' if retained_ready_recovery else None),
         'NetworkDevice routed request 1 command=1',
         'NetworkDevice routed request 2 command=3',
         'NetworkDevice routed request 3 command=2',
@@ -2478,7 +2624,7 @@ def _validate_embedded_public_core_log(trace):
         'DiskDevice routed request 3 command=14',
         'DiskDevice routed request 4 command=3',
     )
-    if not all(item in trace for item in exact):
+    if not all(item in trace for item in exact if item):
         raise RuntimeError('embedded public acceptance core dispatch ordering is incomplete')
 
 
@@ -2528,8 +2674,69 @@ def _validate_embedded_rejected_file_w_fault(pokey, trace):
     }
 
 
-def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False):
+def _validate_embedded_malformed_ready_length_fault(pokey, trace):
+    """Bind the one scheduled bad READY length to retained-response recovery."""
+    windows = _embedded_native_windows(pokey)
+    commands = [window[0] for window in windows]
+    initial = bytes.fromhex('7f 57 36 00 0d')
+    if len(commands) < 9 or commands[4] != initial or commands[5] != bytes.fromhex('7f 50 00 00 cf'):
+        raise RuntimeError('embedded malformed-R evidence lacks the selected File W and READY P')
+    cursor = 6
+    wrong_r = []
+    while cursor < len(commands) and commands[cursor][1] == ord('R'):
+        wrong_r.append(commands[cursor])
+        cursor += 1
+    if not wrong_r or cursor + 2 >= len(commands):
+        raise RuntimeError('embedded malformed-R evidence lacks wrong-R retries and drain')
+    if (commands[cursor] != bytes.fromhex('7f 50 00 00 cf') or
+            commands[cursor + 1] != bytes.fromhex('7f 52 11 00 e2') or
+            commands[cursor + 2] != bytes.fromhex('7f 57 49 00 20')):
+        raise RuntimeError('embedded malformed-R recovery did not drain before distinct W')
+    for index, command in enumerate(wrong_r, start=6):
+        _, begin, end = windows[index]
+        window = pokey[begin:end]
+        sent = re.findall(r"\bSend\s+\$([0-9A-F]{2})", window)
+        received = re.findall(r"Receive\s+< \$([0-9A-F]{2})", window)
+        if (sent or (command[2] | (command[3] << 8)) != 16 or received != ['4E']):
+            raise RuntimeError('embedded malformed-R physical wrong-R attempt was not an exact NAK')
+    events = re.findall(r'fault: File P READY length (\d+) delivered as (\d+)', trace)
+    if events != [('17', '16')]:
+        raise RuntimeError('embedded malformed-R fault did not deliver exactly one 17-to-16 READY length')
+    return {
+        'kind': 'altirra-embedded-public-ready-length-corruption',
+        'original_ready_length': 17,
+        'delivered_ready_length': 16,
+        'wrong_r_attempts': len(wrong_r),
+        'wrong_r_naks': len(wrong_r),
+        'retained_drain': {'p_length': 17, 'r_length': 17},
+        'distinct_w_after_drain': commands[cursor + 2].hex(' '),
+    }
+
+
+def _validate_embedded_public_file_backing(config_dir, rejected_w_recovery=False,
+                                           malformed_r_recovery=False):
+    """Require the real FileDevice side effects implied by public recovery mode."""
+    config_dir = Path(config_dir)
+    recovery = rejected_w_recovery or malformed_r_recovery
+    backing_name = PUBLIC_API_FILE_RECOVERY_NAME if recovery else PUBLIC_API_FILE_NAME
+    backing_marker = PUBLIC_API_FILE_RECOVERY_MARKER if recovery else PUBLIC_API_FILE_MARKER
+    backing_file = config_dir / backing_name
+    if not backing_file.is_file() or backing_file.read_bytes() != backing_marker:
+        raise RuntimeError('embedded public acceptance File backing store lacks the intended guest marker')
+    original_file = config_dir / PUBLIC_API_FILE_NAME
+    if rejected_w_recovery and original_file.exists():
+        raise RuntimeError('embedded rejected-W acceptance unexpectedly persisted the original File write')
+    if malformed_r_recovery:
+        if not original_file.is_file() or original_file.read_bytes() != PUBLIC_API_FILE_MARKER:
+            raise RuntimeError('embedded malformed-R acceptance did not persist the original File write exactly once')
+    return backing_file, original_file if malformed_r_recovery else None
+
+
+def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False,
+                                          malformed_r_recovery=False):
     """Run the public cc65 guest through Altirra's embedded production device."""
+    if rejected_w_recovery and malformed_r_recovery:
+        raise ValueError('embedded public recovery faults are mutually exclusive')
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
     run = (Path(evidence_dir) / 'public-api-clock-embedded').resolve()
@@ -2541,6 +2748,8 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
     device_settings = f'fujinetnio,configdir={config_dir},publicacceptancefixture=true'
     if rejected_w_recovery:
         device_settings += ',publicacceptancerejectfilew=true'
+    if malformed_r_recovery:
+        device_settings += ',publicacceptancemalformedreadylength=true'
     cmd.extend(['--adddevice', device_settings,
                 '--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
     altirra_log = (run / 'altirra.log').open('wb')
@@ -2557,11 +2766,14 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
             if (not device.get('present') or not device.get('healthy') or
                     not device.get('settings', {}).get('publicacceptancefixture') or
                     (rejected_w_recovery and not device.get('settings', {}).get(
-                        'publicacceptancerejectfilew'))):
+                        'publicacceptancerejectfilew')) or
+                    (malformed_r_recovery and not device.get('settings', {}).get(
+                        'publicacceptancemalformedreadylength'))):
                 raise RuntimeError(f'embedded public acceptance device is not healthy/configured: {device}')
             bridge.resume()
         state = inspect_public_api_clock(token, run, timeout,
-                                         rejected_w_recovery=rejected_w_recovery)
+                                         rejected_w_recovery=rejected_w_recovery,
+                                         malformed_r_recovery=malformed_r_recovery)
         altirra_log.flush()
         pokey_path = run / 'pokey-siodata.log'
         if not pokey_path.exists() or not pokey_path.stat().st_size:
@@ -2574,9 +2786,11 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
         trace = (run / 'altirra.log').read_text(errors='replace')
         state['adapter'] = 'altirra-embedded'
         state['native_observations'] = _validate_embedded_public_api_trace(
-            pokey, rejected_w_recovery=rejected_w_recovery)
+            pokey, rejected_w_recovery=rejected_w_recovery,
+            malformed_r_recovery=malformed_r_recovery)
         state['capability_wire'] = state['native_observations'][0]
-        _validate_embedded_public_core_log(trace)
+        _validate_embedded_public_core_log(trace,
+                                           retained_ready_recovery=malformed_r_recovery)
 
         if rejected_w_recovery:
             fault = _validate_embedded_rejected_file_w_fault(pokey, trace)
@@ -2584,16 +2798,19 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
             fault_path.write_text(json.dumps(fault, indent=2) + '\n')
             state['rejected_w_fault'] = fault
             state['rejected_w_fault_evidence'] = str(fault_path)
+        if malformed_r_recovery:
+            fault = _validate_embedded_malformed_ready_length_fault(pokey, trace)
+            fault_path = run / 'embedded-public-malformed-r-fault.json'
+            fault_path.write_text(json.dumps(fault, indent=2) + '\n')
+            state['malformed_r_fault'] = fault
+            state['malformed_r_fault_evidence'] = str(fault_path)
 
-        backing_name = (PUBLIC_API_FILE_RECOVERY_NAME if rejected_w_recovery
-                        else PUBLIC_API_FILE_NAME)
-        backing_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if rejected_w_recovery
-                          else PUBLIC_API_FILE_MARKER)
-        backing_file = config_dir / backing_name
-        if not backing_file.is_file() or backing_file.read_bytes() != backing_marker:
-            raise RuntimeError('embedded public acceptance File backing store lacks the guest marker')
-        if rejected_w_recovery and (config_dir / PUBLIC_API_FILE_NAME).exists():
-            raise RuntimeError('embedded rejected-W acceptance unexpectedly persisted the original File write')
+        backing_file, original_file = _validate_embedded_public_file_backing(
+            config_dir, rejected_w_recovery=rejected_w_recovery,
+            malformed_r_recovery=malformed_r_recovery)
+        if malformed_r_recovery:
+            state['retained_response_backing_file'] = str(original_file)
+            state['retained_response_backing_bytes'] = PUBLIC_API_FILE_MARKER.hex(' ')
         disk_image = config_dir / PUBLIC_API_DISK_IMAGE_NAME
         disk_bytes = disk_image.read_bytes() if disk_image.is_file() else b''
         disk_offset = PUBLIC_API_DISK_ATR_HEADER_BYTES + PUBLIC_API_DISK_LBA * PUBLIC_API_DISK_SECTOR_BYTES
@@ -3488,12 +3705,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-rejected-w-recovery-altirra-embedded-' if a.public_api_rejected_w_recovery_altirra_embedded else
+        evidence_kind = ('atari-sio-public-api-malformed-r-recovery-altirra-embedded-' if a.public_api_malformed_r_recovery_altirra_embedded else
+                         'atari-sio-public-api-rejected-w-recovery-altirra-embedded-' if a.public_api_rejected_w_recovery_altirra_embedded else
                          'atari-sio-public-api-reset-recovery-' if a.public_api_reset_recovery else
                          'atari-sio-public-api-interrupted-r-recovery-' if a.public_api_interrupted_r_recovery else
                          'atari-sio-public-api-malformed-r-recovery-' if a.public_api_malformed_r_recovery else
@@ -3519,7 +3737,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -3527,7 +3745,18 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_rejected_w_recovery_altirra_embedded:
+    if a.public_api_malformed_r_recovery_altirra_embedded:
+        try:
+            result = run_altirra_embedded_public_api_clock(
+                a.timeout, evidence_dir, malformed_r_recovery=True)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.public_api_rejected_w_recovery_altirra_embedded:
         try:
             result = run_altirra_embedded_public_api_clock(
                 a.timeout, evidence_dir, rejected_w_recovery=True)

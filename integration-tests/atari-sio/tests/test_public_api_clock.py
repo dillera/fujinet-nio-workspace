@@ -131,6 +131,85 @@ class PublicApiClockTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._validate_embedded_public_core_log(core_log + '\nFileDevice routed request')
 
+    def test_embedded_malformed_r_requires_retained_drain_before_distinct_w(self):
+        def window(frame, receives):
+            lines = [f"[SIODATA] SendCmd  ${value:02X} >" for value in frame]
+            lines.extend(f"[SIODATA] Receive      < ${value:02X}" for value in receives)
+            return '\n'.join(lines) + '\n'
+
+        q = bytes.fromhex('7f 51 00 00 d0')
+        clock_w = bytes.fromhex('7f 57 06 00 dc')
+        poll = bytes.fromhex('7f 50 00 00 cf')
+        clock_r = bytes.fromhex('7f 52 13 00 e4')
+        initial_w = bytes.fromhex('7f 57 36 00 0d')
+        wrong_r = bytes.fromhex('7f 52 10 00 e1')
+        right_r = bytes.fromhex('7f 52 11 00 e2')
+        recovery_w = bytes.fromhex('7f 57 49 00 20')
+        pokey = ''.join((
+            window(q, b''), window(clock_w, b''), window(poll, b''), window(clock_r, b''),
+            window(initial_w, b''), window(poll, b''),
+            window(wrong_r, b'N'), window(wrong_r, b'N'),
+            window(poll, b''), window(right_r, b''), window(recovery_w, b''),
+        ))
+        log = 'fault: File P READY length 17 delivered as 16\n'
+        fault = boot_runner._validate_embedded_malformed_ready_length_fault(pokey, log)
+        self.assertEqual(fault['wrong_r_attempts'], 2)
+        self.assertEqual(fault['retained_drain'], {'p_length': 17, 'r_length': 17})
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_malformed_ready_length_fault(pokey, '')
+        wrong_retained = pokey.replace(window(right_r, b''), window(wrong_r, b''))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_malformed_ready_length_fault(
+                wrong_retained, log)
+        premature_w = pokey.replace(window(poll, b'') + window(right_r, b''), window(recovery_w, b''))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_malformed_ready_length_fault(premature_w, log)
+        core_log = '\n'.join((
+            'ClockDevice routed request',
+            'FileDevice routed request 1 command=4',
+            'FileDevice routed request 2 command=4',
+            'FileDevice routed request 3 command=3',
+            'NetworkDevice routed request 1 command=1',
+            'NetworkDevice routed request 2 command=3',
+            'NetworkDevice routed request 3 command=2',
+            'NetworkDevice routed request 4 command=4',
+            'Network fixture open count=1 method=2 url=fixture://nio-accept',
+            'Network fixture write count=1 bytes=12 valid=1',
+            'Network fixture close count=1',
+            'Disk fixture mounted slot=2 path=/fnaccept-disk.atr sector_bytes=128 sectors=16',
+            'DiskDevice routed request 1 command=5',
+            'DiskDevice routed request 2 command=4',
+            'DiskDevice routed request 3 command=14',
+            'DiskDevice routed request 4 command=3',
+        ))
+        boot_runner._validate_embedded_public_core_log(core_log, retained_ready_recovery=True)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_core_log(
+                core_log + '\nFileDevice routed request', retained_ready_recovery=True)
+        state = {
+            'file_write_status': '10', 'file_rejected_w_status': '10',
+            'file_failure_status': '10', 'file_recovery_attempted': '01',
+            'file_recovery_kind': '01', 'file_recovery_write_status': '00',
+            'file_recovery_write_device_status': '00', 'file_recovery_write_response_length': 10,
+            'file_recovery_write_count': len(boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER),
+            'file_recovery_verify': '01',
+        }
+        boot_runner._validate_public_file_recovery_state(state)
+        state['file_write_status'] = '00'
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_file_recovery_state(state)
+        with tempfile.TemporaryDirectory() as temporary:
+            backing = Path(temporary)
+            (backing / boot_runner.PUBLIC_API_FILE_RECOVERY_NAME).write_bytes(
+                boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER)
+            with self.assertRaises(RuntimeError):
+                boot_runner._validate_embedded_public_file_backing(
+                    backing, malformed_r_recovery=True)
+            (backing / boot_runner.PUBLIC_API_FILE_NAME).write_bytes(
+                boot_runner.PUBLIC_API_FILE_MARKER)
+            boot_runner._validate_embedded_public_file_backing(
+                backing, malformed_r_recovery=True)
+
     def test_ready_length_relay_requires_retained_response_drain_before_new_w(self):
         def frame(command, aux=0):
             value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))

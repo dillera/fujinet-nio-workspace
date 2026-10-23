@@ -874,8 +874,44 @@ Fresh evidence:
   `embedded-public-rejected-w-fault.json` binding every physical NAK to its
   delivered bad checksum.
 
-Story 2.4 remains open: embedded malformed-length-R, accepted-but-interrupted
-R, and reset recovery are still deferred.
+At that increment, embedded malformed-length-R, accepted-but-interrupted R,
+and reset recovery remained deferred.
+
+### Embedded malformed-length terminal-R retention
+
+The embedded public-acceptance composition now also has the mutually exclusive,
+test-only `publicacceptancemalformedreadylength` setting.  After the real
+54-byte initial File Write has been accepted, dispatched and prepared a real
+17-byte FileDevice response, it changes only the one P(READY) payload scheduled
+through Altirra's SIO delivery boundary from `02 11 00` to `02 10 00` (with its
+new valid SIO checksum `$12`).  The production frontend's `mScheduledReply`
+and outstanding response are never modified.  The following P therefore
+returns the original `02 11 00` response length for the library-owned drain.
+
+Live `fnaccept.xex` evidence records the accepted initial File W, 28 physical
+`R(AUX=$0010)` attempts and real NAKs, then recovery `P(READY,$0011)` and
+`R(AUX=$0011)` returning the original File Write response before the distinct
+recovery W `7f 57 49 00 20`.  The original and recovery files both persist
+their own markers once; the production core records exactly File
+Write/Write/Read dispatches.  The failed public call remains failure `$10` —
+it does not report success or replay the original W.  Clock, Network, Disk,
+explicit Q flags `$00`, PROC `not-advertised`, heartbeat, memory safety and
+`ADP!` continue to pass.
+
+The focused embedded CTest drives real `IATDeviceSIO` callbacks and proves the
+17-to-16 delivery mutation, wrong-R NAK/retention, restored READY length and
+successful exact terminal R.  Python negative checks reject a missing fault,
+wrong retained R length, a W before the P/R drain, duplicate File dispatch,
+false guest success and a missing original persistent side effect.
+
+Fresh evidence:
+
+- `test-evidence/atari-sio-public-api-malformed-r-recovery-altirra-embedded-20261024-001239/`
+  contains POKEY/Altirra logs, screenshot, guest inspection, both File backing
+  stores, Disk inspection and `embedded-public-malformed-r-fault.json`.
+
+Story 2.4 remains open: embedded accepted-but-interrupted terminal-R and
+reset recovery are still deferred.
 
 ## Out of scope
 
