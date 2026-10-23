@@ -1,6 +1,7 @@
 """Focused guards for the Story 2.4 public Clock/File acceptance increment."""
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -201,6 +202,77 @@ class PublicApiClockTests(unittest.TestCase):
         state['file_write_status'] = '00'
         with self.assertRaises(RuntimeError):
             boot_runner._validate_public_file_recovery_state(state)
+
+    def test_reset_relay_requires_real_reset_idle_and_distinct_w(self):
+        def frame(command, aux=0):
+            value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))
+            return value + bytes((boot_runner._sio_checksum(value),))
+
+        initial = boot_runner._file_write_packet(boot_runner.PUBLIC_API_FILE_URI,
+                                                  boot_runner.PUBLIC_API_FILE_MARKER)
+        distinct = boot_runner._file_write_packet(
+            boot_runner.PUBLIC_API_FILE_RECOVERY_URI,
+            boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER)
+        response = boot_runner._file_write_response(boot_runner.PUBLIC_API_FILE_MARKER)
+        summary = {
+            'failure': None,
+            'reset_injected': True,
+            'command_frames': [frame('W', len(initial)).hex(' '), frame('P').hex(' '),
+                               frame('R', len(response)).hex(' '),
+                               frame('R', len(response)).hex(' '), frame('P').hex(' '),
+                               frame('W', len(distinct)).hex(' ')],
+            'w_payloads': {'initial': initial.hex(' '), 'distinct': distinct.hex(' ')},
+            'w_checksums': {'initial': boot_runner._sio_checksum(initial),
+                            'distinct': boot_runner._sio_checksum(distinct)},
+            'ready_payload': bytes((2, len(response), 0)).hex(' '),
+            'ready_checksum': boot_runner._sio_checksum(bytes((2, len(response), 0))),
+            'ready_controls': ['A', 'C'],
+            'r_naks': ['01 4e', '01 4e'],
+            'idle_payload': '00 00 00',
+            'idle_checksum': 0,
+            'idle_controls': ['A', 'C'],
+            'idle_p_seen': True,
+            'distinct_w_seen': True,
+        }
+        boot_runner._validate_public_reset_relay(summary)
+        summary['reset_injected'] = False
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_reset_relay(summary)
+        summary['reset_injected'] = True
+        summary['idle_payload'] = bytes((2, len(response), 0)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_reset_relay(summary)
+        summary['idle_payload'] = '00 00 00'
+        summary['w_payloads']['distinct'] = initial.hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_reset_relay(summary)
+        summary['w_payloads']['distinct'] = distinct.hex(' ')
+        summary['command_frames'][4] = frame('W', len(distinct)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_reset_relay(summary)
+
+    def test_reset_trace_requires_ff_between_ready_and_terminal_r(self):
+        lines = [
+            'udp: Received 7 bytes: 02 7F 57 36 00 0D 07',
+            'udp: Sending 4 bytes: 02 02 11 00',
+            'udp: Received 1 bytes: FF',
+            'l_netsio: COLD_RESET',
+            'udp: Received 7 bytes: 02 7F 52 11 00 E2 08',
+            'udp: Sending 4 bytes: 02 00 00 00',
+            'udp: Received 7 bytes: 02 7F 57 49 00 20 09',
+        ]
+        trace = '\n'.join(lines)
+        with tempfile.TemporaryDirectory() as directory:
+            event, event_path = boot_runner._validate_public_reset_trace(trace, directory)
+            self.assertTrue(event_path.is_file())
+            self.assertEqual(event['wire_datagram'], 'ff')
+            with self.assertRaises(RuntimeError):
+                boot_runner._validate_public_reset_trace(
+                    trace.replace('udp: Received 1 bytes: FF\nl_netsio: COLD_RESET\n', ''), directory)
+            late = '\n'.join([lines[0], lines[1], lines[4], lines[2], lines[3],
+                              lines[5], lines[6]])
+            with self.assertRaises(RuntimeError):
+                boot_runner._validate_public_reset_trace(late, directory)
 
     def test_expected_cc65_clock_is_full_little_endian_eight_bytes(self):
         self.assertEqual(boot_runner.PUBLIC_API_CLOCK_BYTES,

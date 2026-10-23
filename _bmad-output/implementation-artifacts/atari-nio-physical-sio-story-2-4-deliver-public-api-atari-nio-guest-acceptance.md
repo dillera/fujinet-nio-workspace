@@ -464,9 +464,10 @@ Verification performed:
   `test-evidence/atari-sio-boot-20261023-202642/` (`NIO!` for native and
   NetSIO).
 
-Malformed/wrong-length R, accepted-but-interrupted R, device-reset recovery,
-conditional PROC, and embedded-Altirra public-service acceptance remain open;
-this increment does not mark Story 2.4 complete.
+At that increment's completion, malformed/wrong-length R,
+accepted-but-interrupted R, device-reset recovery, conditional PROC, and
+embedded-Altirra public-service acceptance were still pending; later sections
+record the completed recovery increments.  Story 2.4 remains open.
 
 ## Memory-layout investigation and hardening
 
@@ -628,8 +629,8 @@ Verification performed: rebuilt the library/Atari archive and configuration
 ATR; ran all 45 Atari fixture/runner tests; ran all three live public-API
 paths; ran the D1 boot gate; and ran complete `repos/fujinet-nio-lib make
 check`, including all 123 assembled soft65c02 transport assertions and the
-new raw retry guard.  Reset, conditional PROC, and embedded-Altirra
-public-service acceptance remain open.  Story 2.4 is not complete.
+new raw retry guard.  Conditional PROC and embedded-Altirra public-service
+acceptance remain open.  Story 2.4 is not complete.
 
 ## Generic raw-call replay hardening
 
@@ -665,8 +666,7 @@ Fresh live evidence retains all public acceptance behavior:
 The configuration ATR pin above reflects this library change.  The fixture
 validator, focused public runner tests, fresh live public paths, fresh D1 boot
 gate, and complete all-target `repos/fujinet-nio-lib make check` pass.
-Reset, PROC, and embedded public-service acceptance remain deliberately out
-of scope.
+PROC and embedded public-service acceptance remain deliberately out of scope.
 
 ## Accepted terminal-R delivery interruption
 
@@ -704,8 +704,42 @@ Live evidence:
 - `test-evidence/atari-sio-boot-20261023-222432/` freshly preserves the D1
   page-6 `NIO!` native and production-NetSIO gate after this increment.
 
-Story 2.4 remains open: reset, PROC, and embedded public-service acceptance
-are still separate increments.
+Story 2.4 remains open: PROC and embedded public-service acceptance are still
+separate increments.
+
+## Production NetSIO reset recovery
+
+`NetSioPublicResetRelay` establishes a deterministic carrier-only checkpoint:
+it observes the real File Write P(READY `$0011`) from the production endpoint,
+then sends literal NetSIO `FF` to that endpoint immediately before forwarding
+READY's checksum to Altirra.  The Atari guest is neither paused nor reset, and
+the relay never clears frontend state or manufactures an SIO response.  The
+production `nio.log` independently proves the ordering `W → P(READY) → FF /
+COLD_RESET → R`.
+
+The reset discards the queued response.  The guest's correct `$0011` terminal
+R retries are all real endpoint NAKs and its public File call records status
+`$10`, not success.  The original `ATARI-FILE-24` write had already dispatched
+once and persists.  The subsequent distinct public write performs recovery
+P(IDLE `$0000`) before a new W, with no stale terminal-R drain or replay; it
+dispatches once and durably writes `ATARI-FILE-RECOVERY-24`, which the public
+read then verifies.
+
+The relay validator retains and checks literal W payloads/checksums, command
+AUX, READY/IDLE control/data/checksums, every physical R/NAK pair, and both
+backing files.  The trace validator rejects an absent or late FF, a reset that
+does not reach production ingress, a stale READY, a duplicate original write,
+false guest success, or a W before P(IDLE).  Its focused test applies these
+negative mutations against captured-observation inputs.
+
+Live evidence:
+
+- `test-evidence/atari-sio-public-api-reset-recovery-20261023-225116/`
+  records `ADP!`, one original and one distinct File Write dispatch, 28
+  observed post-reset R/NAK pairs, P(IDLE) before the distinct W, literal FF
+  ingress evidence, and separately inspected original/recovery backing files.
+
+Story 2.4 remains open only for PROC and embedded public-service acceptance.
 
 ## Acceptance criteria
 
