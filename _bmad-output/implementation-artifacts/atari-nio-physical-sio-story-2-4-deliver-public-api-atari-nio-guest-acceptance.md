@@ -249,8 +249,8 @@ Read), all through the production NetSIO ingress/frontend/core route.
 The revised link map places loaded code/data at `$2400`–`$6987` and BSS at
 `$6988`–`$7711`; the stable `$0a00` result block remains outside library and
 application static storage. The rebuilt configuration ATR changes only its
-whole-image identity (`disk_v1.json` now pins
-`53063f1b6118424fb6e0ca7a0e9920ada6bfd924b908c1a07c46349fce083eda`);
+whole-image identity (the current `disk_v1.json` pin is maintained by each
+accepted guest increment);
 the independently pinned first four D1 sectors remain byte-identical.
 
 Additional verification performed:
@@ -263,6 +263,66 @@ Additional verification performed:
 
 Network, Disk, recovery, PROC, and embedded-adapter acceptance remain outside
 this focused increment and are still open.
+
+## Implemented increment: NetSIO public Network acceptance
+
+`fnaccept.xex` now preserves the Clock and durable File proofs and adds the
+Network row through public `fn_open()`, `fn_write()`, `fn_read()`, and
+`fn_close()` only.  The guest opens `fixture://nio-accept` with `POST`, writes
+the bounded `NET-WRITE-24` marker, reads the independently defined
+`NET-REPLY-24` response, checks the exact 12-byte counts and EOF flag, then
+closes the returned handle.  It owns neither a FujiBus header nor any SIO/DCB
+or Q/W/P/R framing.  The result block is version 3: `ANP!` at stage 9 records
+all Network transport statuses, handle, write/read counts, read flags, reply
+bytes, verification result, and the retained heartbeat alongside the existing
+Clock/File fields.
+
+The real-core NetSIO acceptance composition registers the production
+`NetworkDevice` with its normal `ProtocolRegistry`.  Its only deterministic
+test component is the small `fixture:` protocol implementation behind that
+device—not a substitute device or protocol peer.  It accepts exactly the
+fixture POST URL, records the exact write bytes, supplies the fixed reply, and
+records `close()`.  The runner rejects the guest result unless it observes
+four real NetworkDevice requests in Open/Write/Read/Close order, the fixture's
+one exact 12-byte write, and its one close.  No service-level `NOT_READY`
+condition is required by this deterministic backend; normal public-library P
+polling remains unchanged.
+
+The Network application payloads are 34 bytes (Open), 21 bytes (Write), 9
+bytes (Read), and 3 bytes (Close), so their complete FujiBus packets including
+the five-byte header remain below 512 bytes.  The rebuilt map puts loaded
+code/data at `$2400`–`$8766` and BSS at `$8767`–`$951c`; the XEX's own BSS is
+160 bytes, and the stable `$0a00` result block remains outside application and
+library storage.
+
+Live evidence:
+`test-evidence/atari-sio-public-api-clock-20261023-184628/` records `ANP!`,
+version `03`, stage `09`, the previous Clock/File successes, Network handle
+`$0100`, all four Network public-call statuses `00`, exact 12-byte write and
+read counts, EOF/verification flags, the literal reply bytes, advancing
+heartbeats, and seven ordered W/P/R exchanges through production NetSIO.  The
+firmware log records exactly one Clock dispatch, two File dispatches
+(WriteFile then ReadFile), and four Network dispatches (Open, Write, Read,
+Close), with the fixture's exact write and close evidence.  The existing D1
+page-6 gate also remains green at
+`test-evidence/atari-sio-boot-20261023-184246/`: native and NetSIO both reach
+`NIO!`, and the boot projection result is `pass`.
+
+Additional verification performed:
+
+- Rebuilt the Atari archive, the XEX, and the configuration ATR; updated the
+  whole-image pin in `disk_v1.json` to
+  `e7ad3b13134c14cd13e0bef7a9d8b02133ecbf4432ea765e7c894c8c8076c71d` while
+  retaining the independent D1 sector literals.
+- Focused public acceptance checks plus the full 39-test Atari fixture/runner
+  suite; the focused guard requires exactly seven ordered native W/P/R
+  operations and rejects a reordered P.
+- Full POSIX firmware CTest (3/3), live `--public-api-clock` Clock+File+
+  Network acceptance, and the unchanged explicit-cold-reset D1 page-6 boot
+  regression.
+
+Disk, recovery, PROC, and embedded-adapter acceptance remain outside this
+focused increment; Story 2.4 remains in progress.
 
 ## Acceptance criteria
 

@@ -11,7 +11,7 @@ import run_boot_acceptance as boot_runner
 
 
 class PublicApiClockTests(unittest.TestCase):
-    def test_guest_uses_public_clock_and_raw_file_calls_without_sio_framing(self):
+    def test_guest_uses_public_apis_without_sio_framing(self):
         source = (WORKSPACE / "repos/nio-core-apps/apps/platform/atari/fnaccept.c").read_text()
         for forbidden in ("SIOV", "ddevic", "dcomnd", "dstats", "0x7f"):
             self.assertNotIn(forbidden, source)
@@ -21,20 +21,17 @@ class PublicApiClockTests(unittest.TestCase):
         self.assertIn("FNACCEPT_FILE_CMD_WRITE", source)
         self.assertIn("FNACCEPT_FILE_CMD_READ", source)
         self.assertIn("persist:///fnaccept-v1.bin", source)
+        for call in ("fn_open(&network_handle", "fn_write(network_handle", "fn_read(network_handle", "fn_close(network_handle"):
+            self.assertIn(call, source)
+        self.assertIn("fixture://nio-accept", source)
 
-    def test_native_clock_file_trace_requires_exact_three_w_p_r_exchanges(self):
-        trace = "\n".join((
-            "udp: Received 7 bytes: 02 7F 57 06 00 DC 02",
-            "udp: Received 7 bytes: 02 7F 50 00 00 CF 05",
-            "udp: Received 7 bytes: 02 7F 52 10 00 E1 06",
-            "udp: Received 7 bytes: 02 7F 57 20 00 FF 07",
-            "udp: Received 7 bytes: 02 7F 50 00 00 CF 08",
-            "udp: Received 7 bytes: 02 7F 52 0A 00 DB 09",
-            "udp: Received 7 bytes: 02 7F 57 12 00 F1 0A",
-            "udp: Received 7 bytes: 02 7F 50 00 00 CF 0B",
-            "udp: Received 7 bytes: 02 7F 52 17 00 E8 0C",
-        ))
-        self.assertEqual(boot_runner._clock_native_commands(trace), ["57", "50", "52"] * 3)
+    def test_native_trace_requires_exact_clock_file_network_w_p_r_exchanges(self):
+        commands = ("57", "50", "52") * 7
+        trace = "\n".join(
+            f"udp: Received 7 bytes: 02 7F {command} 00 00 CF {index:02X}"
+            for index, command in enumerate(commands, start=1)
+        )
+        self.assertEqual(boot_runner._clock_native_commands(trace), list(commands))
         with self.assertRaises(RuntimeError):
             boot_runner._clock_native_commands(trace.replace(" 50 ", " 52 ", 1))
 
@@ -51,6 +48,16 @@ class PublicApiClockTests(unittest.TestCase):
                              boot_runner.PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES, 512)
         self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES +
                              boot_runner.PUBLIC_API_FILE_READ_PAYLOAD_BYTES, 512)
+
+    def test_network_fixture_payloads_and_reply_fit_native_packet_limit(self):
+        self.assertEqual(boot_runner.PUBLIC_API_NETWORK_WRITE_MARKER, b"NET-WRITE-24")
+        self.assertEqual(boot_runner.PUBLIC_API_NETWORK_REPLY_BYTES, b"NET-REPLY-24")
+        for payload_length in (
+                boot_runner.PUBLIC_API_NETWORK_OPEN_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_NETWORK_WRITE_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_NETWORK_READ_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_NETWORK_CLOSE_PAYLOAD_BYTES):
+            self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES + payload_length, 512)
 
 
 if __name__ == "__main__":

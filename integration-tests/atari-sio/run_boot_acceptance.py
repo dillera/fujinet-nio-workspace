@@ -64,12 +64,33 @@ PUBLIC_API_FILE_READ_DEVICE_STATUS = PUBLIC_API_RESULT + 25
 PUBLIC_API_FILE_READ_RESPONSE_LENGTH = PUBLIC_API_RESULT + 26
 PUBLIC_API_FILE_READ_COUNT = PUBLIC_API_RESULT + 28
 PUBLIC_API_FILE_VERIFY = PUBLIC_API_RESULT + 30
+PUBLIC_API_NETWORK_OPEN_STATUS = PUBLIC_API_RESULT + 31
+PUBLIC_API_NETWORK_HANDLE = PUBLIC_API_RESULT + 32
+PUBLIC_API_NETWORK_WRITE_STATUS = PUBLIC_API_RESULT + 34
+PUBLIC_API_NETWORK_WRITE_COUNT = PUBLIC_API_RESULT + 35
+PUBLIC_API_NETWORK_READ_STATUS = PUBLIC_API_RESULT + 37
+PUBLIC_API_NETWORK_READ_COUNT = PUBLIC_API_RESULT + 38
+PUBLIC_API_NETWORK_READ_FLAGS = PUBLIC_API_RESULT + 40
+PUBLIC_API_NETWORK_VERIFY = PUBLIC_API_RESULT + 41
+PUBLIC_API_NETWORK_CLOSE_STATUS = PUBLIC_API_RESULT + 42
+PUBLIC_API_NETWORK_REPLY = PUBLIC_API_RESULT + 43
 PUBLIC_API_FILE_URI = b'persist:///fnaccept-v1.bin'
 PUBLIC_API_FILE_MARKER = b'ATARI-FILE-24'
 PUBLIC_API_FILE_NAME = 'fnaccept-v1.bin'
 PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES = 3 + len(PUBLIC_API_FILE_URI) + 4 + 2 + len(PUBLIC_API_FILE_MARKER)
 PUBLIC_API_FILE_READ_PAYLOAD_BYTES = 3 + len(PUBLIC_API_FILE_URI) + 4 + 2
 PUBLIC_API_FUJIBUS_HEADER_BYTES = 5
+PUBLIC_API_NETWORK_URI = b'fixture://nio-accept'
+PUBLIC_API_NETWORK_WRITE_MARKER = b'NET-WRITE-24'
+PUBLIC_API_NETWORK_REPLY_BYTES = b'NET-REPLY-24'
+# NetworkDevice application payloads: Open(method, mode, translation,
+# urlLength, URL, loginLength, passwordLength, bodyLength), then the
+# documented Write/Read/Close request fields.  The public library owns the
+# FujiBus header and all native-SIO framing.
+PUBLIC_API_NETWORK_OPEN_PAYLOAD_BYTES = 1 + 1 + 1 + 2 + len(PUBLIC_API_NETWORK_URI) + 2 + 4 + 2
+PUBLIC_API_NETWORK_WRITE_PAYLOAD_BYTES = 1 + 2 + 4 + 2 + len(PUBLIC_API_NETWORK_WRITE_MARKER)
+PUBLIC_API_NETWORK_READ_PAYLOAD_BYTES = 1 + 2 + 4 + 2
+PUBLIC_API_NETWORK_CLOSE_PAYLOAD_BYTES = 1 + 2
 # A bridge pause can capture any instruction-boundary phase of the three-byte
 # JMP $0624 loop, including the post-operand PC just before its target applies.
 LOOP_PCS = {LOOP, LOOP + 1, LOOP + 2, LOOP + 3}
@@ -837,14 +858,14 @@ def _read_u16(bridge, address):
 
 
 def inspect_public_api_clock(token, evidence_dir, timeout):
-    """Inspect the public Clock/File guest result and continued execution."""
+    """Inspect the public Clock/File/Network guest result and execution."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
     deadline = time.monotonic() + timeout
     with AltirraBridge.from_token_file(token) as bridge:
         while time.monotonic() < deadline:
             signature = bridge.peek(PUBLIC_API_RESULT, 4)
-            if signature in (b'AFP!', b'ACF!'):
+            if signature in (b'ANP!', b'ACF!'):
                 state = {
                     'guest_result': signature.decode('ascii'),
                     'version': bridge.peek(PUBLIC_API_RESULT + 4, 1).hex(),
@@ -861,6 +882,17 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                     'file_read_response_length': _read_u16(bridge, PUBLIC_API_FILE_READ_RESPONSE_LENGTH),
                     'file_read_count': _read_u16(bridge, PUBLIC_API_FILE_READ_COUNT),
                     'file_verify': bridge.peek(PUBLIC_API_FILE_VERIFY, 1).hex(),
+                    'network_open_status': bridge.peek(PUBLIC_API_NETWORK_OPEN_STATUS, 1).hex(),
+                    'network_handle': _read_u16(bridge, PUBLIC_API_NETWORK_HANDLE),
+                    'network_write_status': bridge.peek(PUBLIC_API_NETWORK_WRITE_STATUS, 1).hex(),
+                    'network_write_count': _read_u16(bridge, PUBLIC_API_NETWORK_WRITE_COUNT),
+                    'network_read_status': bridge.peek(PUBLIC_API_NETWORK_READ_STATUS, 1).hex(),
+                    'network_read_count': _read_u16(bridge, PUBLIC_API_NETWORK_READ_COUNT),
+                    'network_read_flags': bridge.peek(PUBLIC_API_NETWORK_READ_FLAGS, 1).hex(),
+                    'network_verify': bridge.peek(PUBLIC_API_NETWORK_VERIFY, 1).hex(),
+                    'network_close_status': bridge.peek(PUBLIC_API_NETWORK_CLOSE_STATUS, 1).hex(),
+                    'network_reply': bridge.peek(PUBLIC_API_NETWORK_REPLY,
+                                                 len(PUBLIC_API_NETWORK_REPLY_BYTES)).hex(' '),
                 }
                 heartbeats = []
                 for _ in range(4):
@@ -870,10 +902,10 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                 state['continued_execution'] = len(set(heartbeats)) > 1
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
-                if signature != b'AFP!':
-                    raise RuntimeError(f"public API Clock/File guest failed at stage {state['stage']}")
-                if state['version'] != '02' or state['stage'] != '05':
-                    raise RuntimeError(f"public API Clock/File guest has invalid result header: {state}")
+                if signature != b'ANP!':
+                    raise RuntimeError(f"public API Clock/File/Network guest failed at stage {state['stage']}")
+                if state['version'] != '03' or state['stage'] != '09':
+                    raise RuntimeError(f"public API Clock/File/Network guest has invalid result header: {state}")
                 if state['init_status'] != '00' or state['clock_status'] != '00':
                     raise RuntimeError(f"public API Clock call did not succeed: {state}")
                 if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
@@ -888,8 +920,18 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                         '00', '00', 10 + len(PUBLIC_API_FILE_MARKER),
                         len(PUBLIC_API_FILE_MARKER), '01'):
                     raise RuntimeError(f"public API File readback result mismatch: {state}")
+                if (state['network_open_status'], state['network_write_status'],
+                    state['network_read_status'], state['network_close_status'],
+                    state['network_write_count'], state['network_read_count'],
+                    state['network_read_flags'], state['network_verify']) != (
+                        '00', '00', '00', '00',
+                        len(PUBLIC_API_NETWORK_WRITE_MARKER), len(PUBLIC_API_NETWORK_REPLY_BYTES),
+                        '01', '01') or state['network_handle'] == 0xffff:
+                    raise RuntimeError(f"public API Network call result mismatch: {state}")
+                if bytes.fromhex(state['network_reply']) != PUBLIC_API_NETWORK_REPLY_BYTES:
+                    raise RuntimeError(f"public API Network reply mismatch: {state}")
                 if not state['continued_execution']:
-                    raise RuntimeError('public API Clock/File guest did not continue after its result')
+                    raise RuntimeError('public API Clock/File/Network guest did not continue after its result')
                 return state
             time.sleep(.05)
     raise RuntimeError('public API Clock/File guest did not reach a terminal result')
@@ -897,14 +939,14 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
 
 def _clock_native_commands(trace):
     commands = re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace)
-    expected = ['57', '50', '52'] * 3
+    expected = ['57', '50', '52'] * 7
     if commands != expected:
-        raise RuntimeError(f'public API Clock/File native command order is {commands}, expected {expected}')
+        raise RuntimeError(f'public API Clock/File/Network native command order is {commands}, expected {expected}')
     return commands
 
 
 def run_netsio_public_api_clock(timeout, evidence_dir):
-    """Run public Clock plus File write/read through production NetSIO ingress."""
+    """Run public Clock, File, and Network calls through production NetSIO."""
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
     if not PUBLIC_API_CLOCK_ENDPOINT.is_file():
@@ -923,7 +965,7 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         ps.append(launch([str(PUBLIC_API_CLOCK_ENDPOINT), '--host', '127.0.0.1', '--port', '9997',
                           '--storage-root', str(storage_root)],
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
-        wait_log(run / 'nio.log', 'Atari public-API Clock/File acceptance initialized', timeout=15)
+        wait_log(run / 'nio.log', 'Atari public-API Clock/File/Network acceptance initialized', timeout=15)
         before = set(Path('/tmp').glob('altirra-bridge-*.token'))
         cmd, env, temps = altirra_command(False, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
         cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
@@ -948,6 +990,19 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         if ('FileDevice routed request 1 command=4' not in trace or
                 'FileDevice routed request 2 command=3' not in trace):
             raise RuntimeError('public API File dispatch order was not WriteFile then ReadFile')
+        if trace.count('NetworkDevice routed request') != 4:
+            raise RuntimeError('public API Network did not produce exactly four real NetworkDevice dispatches')
+        expected_network_dispatches = (
+            'NetworkDevice routed request 1 command=1',
+            'NetworkDevice routed request 2 command=3',
+            'NetworkDevice routed request 3 command=2',
+            'NetworkDevice routed request 4 command=4',
+            'Network fixture open count=1 method=2 url=fixture://nio-accept',
+            'Network fixture write count=1 bytes=12 valid=1',
+            'Network fixture close count=1',
+        )
+        if not all(expected in trace for expected in expected_network_dispatches):
+            raise RuntimeError('public API Network fixture did not observe the exact open/write/read/close route')
         backing_file = storage_root / PUBLIC_API_FILE_NAME
         if not backing_file.is_file() or backing_file.read_bytes() != PUBLIC_API_FILE_MARKER:
             raise RuntimeError('public API File backing store does not retain the guest marker')
@@ -962,6 +1017,8 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
             pokey.write_text('\n'.join(lines) + '\n')
         state['run_dir'] = str(run)
         state['expected_clock_bytes'] = PUBLIC_API_CLOCK_BYTES.hex(' ')
+        state['expected_network_write'] = PUBLIC_API_NETWORK_WRITE_MARKER.hex(' ')
+        state['expected_network_reply'] = PUBLIC_API_NETWORK_REPLY_BYTES.hex(' ')
         return state
     finally:
         if altirra_log:
