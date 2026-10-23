@@ -25,6 +25,7 @@ NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projec
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
 NATIVE_INTERRUPTED_R_RECOVERY_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-interrupted-r-recovery.xex"
 NATIVE_CAPACITY_BOUNDS_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-capacity-bounds.xex"
+PUBLIC_API_CLOCK_XEX = ROOT / "repos/nio-core-apps/build/atari/bin/fnaccept.xex"
 TRACE_FIXTURE = ROOT / "integration-tests/atari-sio/fixtures/boot_acceptance_trace.json"
 PROFILE = ROOT / "configs/atari/profiles/atari-nio-config-boot.yaml"
 ALTIRRA = ROOT / "repos/AltirraSDL/build/linux-debug/src/AltirraSDL/AltirraSDL"
@@ -32,6 +33,7 @@ SDK = ROOT / "repos/AltirraSDL/src/AltirraSDL/AltirraBridge/sdk/python"
 HUB = ROOT / "repos/fujinet-emulator-bridge/fujinet-bridge"
 NIO = ROOT / "repos/fujinet-nio/build/atari-fujibus-netsio-debug/fujinet-nio"
 NATIVE_CORE_DISPATCH = ROOT / "repos/fujinet-nio/build/atari-fujibus-netsio-debug/tests/fujinet-nio-atari-netsio-projection"
+PUBLIC_API_CLOCK_ENDPOINT = ROOT / "repos/fujinet-nio/build/atari-fujibus-netsio-debug/tests/fujinet-nio-atari-netsio-clock-acceptance"
 SIG, LOOP = b"NIO!", 0x0624
 PROJECTION_RESULT = 0x0800
 PROJECTION_Q_REPLY = 0x0810
@@ -49,6 +51,10 @@ PROJECTION_CAPACITY_REQUEST_GUARD_HIGH = 0x2200
 PROJECTION_CAPACITY_RESPONSE_GUARD_LOW = 0x23ff
 PROJECTION_CAPACITY_RESPONSE = 0x2400
 PROJECTION_CAPACITY_RESPONSE_GUARD_HIGH = 0x2600
+PUBLIC_API_RESULT = 0x0A00
+PUBLIC_API_CLOCK_TIME = PUBLIC_API_RESULT + 8
+PUBLIC_API_HEARTBEAT = PUBLIC_API_RESULT + 16
+PUBLIC_API_CLOCK_BYTES = bytes.fromhex('08 07 06 05 04 03 02 01')
 # A bridge pause can capture any instruction-boundary phase of the three-byte
 # JMP $0624 loop, including the post-operand PC just before its target applies.
 LOOP_PCS = {LOOP, LOOP + 1, LOOP + 2, LOOP + 3}
@@ -809,6 +815,114 @@ def run_netsio_native_interrupted_r_recovery(timeout, evidence_dir):
 def run_netsio_native_capacity_bounds(timeout, evidence_dir):
     """Run 511/512/513 packet bounds against the production NetSIO endpoint."""
     return run_netsio_native_core_dispatch(timeout, evidence_dir, capacity_bounds=True)
+
+
+def inspect_public_api_clock(token, evidence_dir, timeout):
+    """Inspect the public-API guest result block and its continued execution."""
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    deadline = time.monotonic() + timeout
+    with AltirraBridge.from_token_file(token) as bridge:
+        while time.monotonic() < deadline:
+            signature = bridge.peek(PUBLIC_API_RESULT, 4)
+            if signature in (b'ACP!', b'ACF!'):
+                state = {
+                    'guest_result': signature.decode('ascii'),
+                    'version': bridge.peek(PUBLIC_API_RESULT + 4, 1).hex(),
+                    'stage': bridge.peek(PUBLIC_API_RESULT + 5, 1).hex(),
+                    'init_status': bridge.peek(PUBLIC_API_RESULT + 6, 1).hex(),
+                    'clock_status': bridge.peek(PUBLIC_API_RESULT + 7, 1).hex(),
+                    'clock_value': bridge.peek(PUBLIC_API_CLOCK_TIME, 8).hex(' '),
+                }
+                heartbeats = []
+                for _ in range(4):
+                    heartbeats.append(bridge.peek(PUBLIC_API_HEARTBEAT, 2).hex())
+                    time.sleep(.02)
+                state['heartbeats'] = heartbeats
+                state['continued_execution'] = len(set(heartbeats)) > 1
+                evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
+                evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
+                if signature != b'ACP!':
+                    raise RuntimeError(f"public API Clock guest failed at stage {state['stage']}")
+                if state['version'] != '01' or state['stage'] != '03':
+                    raise RuntimeError(f"public API Clock guest has invalid result header: {state}")
+                if state['init_status'] != '00' or state['clock_status'] != '00':
+                    raise RuntimeError(f"public API Clock call did not succeed: {state}")
+                if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
+                    raise RuntimeError(f"public API Clock value mismatch: {state['clock_value']}")
+                if not state['continued_execution']:
+                    raise RuntimeError('public API Clock guest did not continue after its result')
+                return state
+            time.sleep(.05)
+    raise RuntimeError('public API Clock guest did not reach a terminal result')
+
+
+def _clock_native_commands(trace):
+    commands = re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace)
+    expected = ['57', '50', '52']
+    if commands != expected:
+        raise RuntimeError(f'public API Clock native command order is {commands}, expected {expected}')
+    return commands
+
+
+def run_netsio_public_api_clock(timeout, evidence_dir):
+    """Run fn_init()/fn_clock_get() through the production NetSIO ingress."""
+    if not PUBLIC_API_CLOCK_XEX.is_file():
+        raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
+    if not PUBLIC_API_CLOCK_ENDPOINT.is_file():
+        raise RuntimeError(f'public API Clock endpoint is missing: {PUBLIC_API_CLOCK_ENDPOINT}')
+    run = (Path(evidence_dir) / 'public-api-clock').resolve()
+    run.mkdir(parents=True, exist_ok=True)
+    ps = []
+    altirra_log = None
+    try:
+        hub = (run / 'hub.log').open('wb')
+        nio = (run / 'nio.log').open('wb')
+        ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', '9997'],
+                         cwd=HUB, stdout=hub, stderr=subprocess.STDOUT))
+        wait_log(run / 'hub.log', 'Listening for NetSIO packets on port 9997')
+        ps.append(launch([str(PUBLIC_API_CLOCK_ENDPOINT), '--host', '127.0.0.1', '--port', '9997'],
+                         cwd=run, stdout=nio, stderr=subprocess.STDOUT))
+        wait_log(run / 'nio.log', 'Atari public-API Clock acceptance initialized', timeout=15)
+        before = set(Path('/tmp').glob('altirra-bridge-*.token'))
+        cmd, env, temps = altirra_command(False, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
+        cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
+        altirra_log = (run / 'altirra.log').open('wb')
+        ps.append(launch(cmd, cwd=run, env=env, stdout=altirra_log, stderr=subprocess.STDOUT))
+        token = fresh_token(before)
+        wait_log(run / 'altirra.log', 'NetSIO Cold Reset', timeout=15)
+        cold_reset_after_device_ready(token)
+        sys.path[:0] = [str(SDK)]
+        from altirra_bridge import AltirraBridge
+        with AltirraBridge.from_token_file(token) as bridge:
+            bridge.resume()
+        state = inspect_public_api_clock(token, run, timeout)
+        altirra_log.flush()
+        nio.flush()
+        trace = (run / 'nio.log').read_text(errors='replace')
+        state['native_commands'] = _clock_native_commands(trace)
+        if trace.count('ClockDevice routed request') != 1:
+            raise RuntimeError('public API Clock did not produce exactly one real ClockDevice dispatch')
+        pokey = run / 'pokey-siodata.log'
+        if not pokey.exists() or not pokey.stat().st_size:
+            lines = [line for line in (run / 'altirra.log').read_text(errors='replace').splitlines()
+                     if '[SIODATA]' in line]
+            if not lines:
+                raise RuntimeError('public API Clock has no captured POKEY SIODATA diagnostics')
+            pokey.write_text('\n'.join(lines) + '\n')
+        state['run_dir'] = str(run)
+        state['expected_clock_bytes'] = PUBLIC_API_CLOCK_BYTES.hex(' ')
+        return state
+    finally:
+        if altirra_log:
+            altirra_log.close()
+        if 'hub' in locals():
+            hub.close()
+        if 'nio' in locals():
+            nio.close()
+        if 'temps' in locals():
+            cleanup_temps(temps)
+        stop(ps)
 
 
 def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False,
@@ -1682,12 +1796,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-native-capacity-bounds-altirra-embedded-' if a.native_capacity_bounds_altirra_embedded else
+        evidence_kind = ('atari-sio-public-api-clock-' if a.public_api_clock else
+                         'atari-sio-native-capacity-bounds-altirra-embedded-' if a.native_capacity_bounds_altirra_embedded else
                          'atari-sio-native-interrupted-r-recovery-altirra-embedded-' if a.native_interrupted_r_recovery_altirra_embedded else
                          'atari-sio-native-reset-to-idle-altirra-embedded-' if a.native_reset_to_idle_altirra_embedded else
                          'atari-sio-native-wrong-r-retention-altirra-embedded-' if a.native_wrong_r_retention_altirra_embedded else
@@ -1706,7 +1821,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -1714,7 +1829,17 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.native_capacity_bounds_altirra_embedded:
+    if a.public_api_clock:
+        try:
+            result = run_netsio_public_api_clock(a.timeout, evidence_dir)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_capacity_bounds_altirra_embedded:
         try:
             result = run_altirra_embedded_native_capacity_bounds(a.timeout, evidence_dir)
             result['virtual_projection_result'] = write_altirra_embedded_native_capacity_bounds_projection(result)

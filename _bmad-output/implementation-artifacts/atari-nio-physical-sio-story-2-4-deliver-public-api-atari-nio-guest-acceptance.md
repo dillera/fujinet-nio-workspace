@@ -4,7 +4,7 @@ feature: 'atari-nio-physical-sio'
 story: '2.4'
 type: 'feature'
 created: '2026-10-23'
-status: 'draft'
+status: 'in-progress'
 baseline_workspace_commit: '204887e1'
 context:
   - 'docs/agent-test-policy.md'
@@ -155,24 +155,68 @@ adapter run.
 
 ## Genuine pre-implementation decisions
 
-1. **File API:** `fujinet-nio-lib` currently exports no typed public
-   `fn_file_*` API.  Its available generic public route is `fn_raw_call()`;
-   `fuji_*appkey` is a legacy-named compatibility wrapper and does not meet the
-   requested `fn_*`-only guest surface.  Preferred implementation: add the
-   smallest typed `fn_file_write`/`fn_file_read` public wrappers with
-   caller-owned bounded buffers, then run the full library `make check`.
-   Alternative, if approved, is to use public `fn_raw_call()` with the File
-   protocol payload explicitly documented as the acceptance surface.  This
-   choice is required before coding.
-2. **PROC evidence:** capability bit 0 is currently not advertised.  Treating
-   the optional PROC path as conditional/unavailable is faithful to the wire
-   contract; demanding a live pulse would require a separately approved
-   endpoint/adapter capability change, not a test-only fake.
-3. **Deterministic services:** the current Story 2.3 projection fixture is a
+1. **File API (approved):** File acceptance uses the existing public
+   `fn_raw_call()` with a small bounded test-local FileDevice payload helper.
+   It does not add typed `fn_file_*` APIs, use `fuji_*appkey`, or implement
+   SIO/FujiBus framing in the guest.
+2. **PROC evidence (approved):** capability bit 0 is currently not advertised;
+   the guest reports `not-advertised`.  A live pulse requires a real advertised
+   capability, never a test-only fake.
+3. **Deterministic services (approved):** the current Story 2.3 projection fixture is a
    single downstream `VirtualDevice`, not a Clock/File/Network/Disk service
    fixture.  Story 2.4 needs the real-core deterministic composition described
    above, shared by both adapter runners.  This is new test composition, not a
    new service or transport.
+
+## Implemented increment: NetSIO public Clock acceptance
+
+This increment implements only the Clock row over NetSIO. The configuration
+ATR now stages `fnaccept.xex` through the existing Atari manifest. The XEX
+links the published Atari `fujinet-nio-lib` archive and calls only `fn_init()`
+and `fn_clock_get()`; it contains no guest SIOV/DCB/native-channel framing.
+Its version-1 result block at `$0a00` records `ACP!`/`ACF!`, init and Clock
+statuses, all eight `FN_TIME_T` bytes, and a two-byte heartbeat. The runner
+rejects completion unless the heartbeat continues advancing after the
+successful public call.
+
+`fujinet-nio-atari-netsio-clock-acceptance` composes a real `FujinetCore`, its
+production `ClockDevice`, production NetSIO ingress/router/frontend, and the
+existing Altirra/NetSIO lifecycle. The only test control is the POSIX Clock
+device's existing deterministic Unix-time hook, set to `$0102030405060708`.
+The runner requires one real routed Clock request and captures native W/P/R
+traffic; it compares the guest's returned bytes to literal
+`08 07 06 05 04 03 02 01` rather than manufacturing a reply.
+
+Live evidence: `test-evidence/atari-sio-public-api-clock-20261023-180818/`
+records `ACP!`, init and Clock status `00`, the complete expected eight-byte
+value, advancing heartbeats, and native command order `W/P/R`. The ordinary
+D1 page-6 gate remains independently green at
+`test-evidence/atari-sio-boot-20261023-180829/`. The configuration-ATR's
+changed directory sector is pinned separately by the rebuilt literal
+`disk_v1.json` source-image fixture.
+
+The live XEX exposed a concrete library defect: Atari `fn_transport_init`
+established its 512-byte baseline but returned the high capacity byte (`02`)
+instead of `FN_OK`. The assembly now explicitly returns `FN_OK`, with an
+additional actual-6502 soft65c02 assertion. This is a production correctness
+fix, not guest-side accommodation.
+
+The reviewed link map places loaded code/data at `$2400`–`$6429` and BSS at
+`$642a`–`$7133`; the `$0a00` result block is outside all application and
+library static storage. File, Network, Disk, recovery, PROC, and embedded
+adapter acceptance remain deliberately unimplemented in this increment.
+
+Verification performed:
+
+- `make -C repos/fujinet-nio-lib test-atari-transport`, `make atari`, and
+  complete `make check` (including the 123-case assembled Atari transport
+  suite).
+- `make -C repos/nio-core-apps -f makefiles/build.mk TARGET=atari boot-disk`.
+- Firmware build target and full POSIX CTest in
+  `repos/fujinet-nio/build/atari-fujibus-netsio-debug`.
+- `python3 -m unittest discover -s integration-tests/atari-sio/tests -p
+  'test_*.py'` (37 tests), live `--public-api-clock`, and the existing
+  explicit-cold-reset D1 page-6 boot regression.
 
 ## Acceptance criteria
 
