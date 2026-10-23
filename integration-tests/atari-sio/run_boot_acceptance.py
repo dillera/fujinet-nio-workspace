@@ -14,6 +14,7 @@ from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_altirra_embedded_native_wrong_r_retention,
                                 compare_altirra_embedded_native_reset_to_idle,
                                 compare_altirra_embedded_native_interrupted_r_recovery,
+                                compare_altirra_embedded_native_capacity_bounds,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
 
@@ -811,19 +812,22 @@ def run_netsio_native_capacity_bounds(timeout, evidence_dir):
 
 
 def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False,
-                                              reset_to_idle=False, interrupted_r_recovery=False):
+                                              reset_to_idle=False, interrupted_r_recovery=False,
+                                              capacity_bounds=False):
     """Run the native guest through Altirra's embedded production endpoint.
 
     The normal profile's NetSIO custom device is removed, then the actual
     fujinetnio device is added with its explicit projection-only core route.
     There is no hub, UDP endpoint, or replacement Q/W/P/R implementation.
     """
-    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery)) > 1:
+    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery, capacity_bounds)) > 1:
         raise ValueError('embedded native projection variants are mutually exclusive')
-    scenario_id = ('native-interrupted-r-recovery' if interrupted_r_recovery else
+    scenario_id = ('native-capacity-bounds' if capacity_bounds else
+                   'native-interrupted-r-recovery' if interrupted_r_recovery else
                    'native-reset-to-idle' if reset_to_idle else
                    'native-wrong-r-retention' if wrong_r_retention else 'native-core-dispatch')
-    program = (NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
+    program = (NATIVE_CAPACITY_BOUNDS_XEX if capacity_bounds else
+               NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
                NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
                NATIVE_WRONG_R_RETENTION_XEX if wrong_r_retention else NATIVE_CORE_DISPATCH_XEX)
     if not program.is_file():
@@ -875,7 +879,8 @@ def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_ret
         result = inspect_native_core_dispatch(token, run, timeout,
                                               wrong_r_retention=wrong_r_retention,
                                               reset_to_idle=reset_to_idle,
-                                              interrupted_r_recovery=interrupted_r_recovery)
+                                              interrupted_r_recovery=interrupted_r_recovery,
+                                              capacity_bounds=capacity_bounds)
         altirra_log.flush()
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
@@ -926,6 +931,12 @@ def run_altirra_embedded_native_interrupted_r_recovery(timeout, evidence_dir):
     """Interrupt only accepted terminal-R checksum delivery through Altirra SIO."""
     return run_altirra_embedded_native_core_dispatch(
         timeout, evidence_dir, interrupted_r_recovery=True)
+
+
+def run_altirra_embedded_native_capacity_bounds(timeout, evidence_dir):
+    """Run 511/512/513 packet bounds through Altirra's embedded endpoint."""
+    return run_altirra_embedded_native_core_dispatch(
+        timeout, evidence_dir, capacity_bounds=True)
 
 def write_netsio_boot_projection(run_result):
     """Write adapter-scoped virtual evidence from the existing boot lifecycle.
@@ -1204,6 +1215,49 @@ def _embedded_replace_w_data(trace, occurrence, payload, checksum):
         cursor = match.end(2)
     pieces.append(window[cursor:])
     return trace[:begin] + "".join(pieces) + trace[end:]
+
+
+def _embedded_replace_command(trace, command, occurrence, replacement):
+    """Alter one captured command frame only for an embedded verifier negative."""
+    matching = [window for window in _embedded_native_windows(trace) if window[0] == command]
+    if occurrence >= len(matching) or len(replacement) != 5:
+        raise RuntimeError("could not find captured embedded command for mutation")
+    _, begin, end = matching[occurrence]
+    window = trace[begin:end]
+    sent = list(re.finditer(r"(SendCmd\s+\$)([0-9A-F]{2})", window))[:5]
+    if len(sent) != 5:
+        raise RuntimeError("captured embedded command has unexpected byte count")
+    pieces = []
+    cursor = 0
+    for match, value in zip(sent, replacement):
+        pieces.extend((window[cursor:match.start(2)], f"{value:02X}"))
+        cursor = match.end(2)
+    pieces.append(window[cursor:])
+    return trace[:begin] + "".join(pieces) + trace[end:]
+
+
+def _embedded_capacity_response_mutation(trace, duplicate=False):
+    """Corrupt or duplicate a real captured byte in the 512-byte terminal R."""
+    command = bytes.fromhex("7f 52 00 02 d3")
+    matching = [window for window in _embedded_native_windows(trace) if window[0] == command]
+    if len(matching) != 1:
+        raise RuntimeError("could not find one captured embedded 512-byte R")
+    _, begin, end = matching[0]
+    window = trace[begin:end]
+    receives = list(re.finditer(r"(Receive\s+< \$)([0-9A-F]{2})", window))
+    # ACK, COMPLETE, raw packet (512), then its SIO checksum.
+    if len(receives) != 515:
+        raise RuntimeError("captured embedded 512-byte R has unexpected byte count")
+    middle = receives[2 + 256]
+    if not duplicate:
+        replacement = f"{int(middle.group(2), 16) ^ 1:02X}"
+        return trace[:begin] + window[:middle.start(2)] + replacement + window[middle.end(2):] + trace[end:]
+    line_begin = window.rfind("\n", 0, middle.start()) + 1
+    line_end = window.find("\n", middle.end())
+    if line_end < 0:
+        raise RuntimeError("could not duplicate captured embedded 512-byte R data")
+    line = window[line_begin:line_end + 1]
+    return trace[:begin] + window[:line_end + 1] + line + window[line_end + 1:] + trace[end:]
 
 
 def write_altirra_embedded_native_reset_to_idle_projection(run_result):
@@ -1570,13 +1624,71 @@ def write_netsio_native_capacity_bounds_projection(run_result):
     result["result_path"] = str(path)
     return result
 
+
+def write_altirra_embedded_native_capacity_bounds_projection(run_result):
+    """Record byte-complete bounds evidence from Altirra's real SIO path."""
+    run = Path(run_result["run_dir"])
+    manifest = validate_manifest(load_manifest())
+    pokey = (run / "pokey-siodata.log").read_text(errors="replace")
+    altirra = (run / "altirra.log").read_text(errors="replace")
+    observed = compare_altirra_embedded_native_capacity_bounds(pokey, altirra, manifest)
+    _assert_capacity_guest_state(run_result)
+
+    corrupted = _embedded_capacity_response_mutation(pokey)
+    try:
+        compare_altirra_embedded_native_capacity_bounds(corrupted, altirra, manifest)
+    except ProjectionMismatch:
+        middle_byte_negative_verified = True
+    else:
+        raise RuntimeError("corrupted embedded 512-byte response unexpectedly passed comparison")
+
+    # The second P is the required P(READY, $0200). A different reported
+    # length must not count as evidence even when all payload bytes remain.
+    wrong_p_length = _embedded_replace_response(
+        pokey, bytes.fromhex("7f 50 00 00 cf"), 1, b"AC\x02\xff\x01\x02")
+    try:
+        compare_altirra_embedded_native_capacity_bounds(wrong_p_length, altirra, manifest)
+    except ProjectionMismatch:
+        p_length_negative_verified = True
+    else:
+        raise RuntimeError("incorrect embedded P(READY) length unexpectedly passed comparison")
+
+    wrong_r_length = _embedded_replace_command(
+        pokey, bytes.fromhex("7f 52 00 02 d3"), 0, bytes.fromhex("7f 52 ff 01 d3"))
+    try:
+        compare_altirra_embedded_native_capacity_bounds(wrong_r_length, altirra, manifest)
+    except ProjectionMismatch:
+        r_length_negative_verified = True
+    else:
+        raise RuntimeError("incorrect embedded terminal-R AUX unexpectedly passed comparison")
+
+    duplicated = _embedded_capacity_response_mutation(pokey, duplicate=True)
+    try:
+        compare_altirra_embedded_native_capacity_bounds(duplicated, altirra, manifest)
+    except ProjectionMismatch:
+        duplicate_negative_verified = True
+    else:
+        raise RuntimeError("duplicated embedded 512-byte response unexpectedly passed comparison")
+
+    result = scenario_result("altirra-embedded", "native-capacity-bounds", observed,
+                             evidence_paths_for_boot(run, "altirra-embedded"),
+                             passed=run_result["guest_result"] == "NVP!")
+    result["negative_middle_byte_mutation_rejected"] = middle_byte_negative_verified
+    result["negative_p_length_mutation_rejected"] = p_length_negative_verified
+    result["negative_r_length_mutation_rejected"] = r_length_negative_verified
+    result["negative_duplicate_data_mutation_rejected"] = duplicate_negative_verified
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-native-interrupted-r-recovery-altirra-embedded-' if a.native_interrupted_r_recovery_altirra_embedded else
+        evidence_kind = ('atari-sio-native-capacity-bounds-altirra-embedded-' if a.native_capacity_bounds_altirra_embedded else
+                         'atari-sio-native-interrupted-r-recovery-altirra-embedded-' if a.native_interrupted_r_recovery_altirra_embedded else
                          'atari-sio-native-reset-to-idle-altirra-embedded-' if a.native_reset_to_idle_altirra_embedded else
                          'atari-sio-native-wrong-r-retention-altirra-embedded-' if a.native_wrong_r_retention_altirra_embedded else
                          'atari-sio-native-core-dispatch-altirra-embedded-' if a.native_core_dispatch_altirra_embedded else
@@ -1597,11 +1709,26 @@ if __name__=='__main__':
     if sum((a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
+            a.native_capacity_bounds_altirra_embedded,
             a.native_wrong_r_retention_altirra_embedded,
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.native_interrupted_r_recovery_altirra_embedded:
+    if a.native_capacity_bounds_altirra_embedded:
+        try:
+            result = run_altirra_embedded_native_capacity_bounds(a.timeout, evidence_dir)
+            result['virtual_projection_result'] = write_altirra_embedded_native_capacity_bounds_projection(result)
+            if result['virtual_projection_result']['status'] != 'pass':
+                raise RuntimeError('embedded native-capacity-bounds evidence is '
+                                   f"{result['virtual_projection_result']['status']}")
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_interrupted_r_recovery_altirra_embedded:
         try:
             result = run_altirra_embedded_native_interrupted_r_recovery(a.timeout, evidence_dir)
             result['virtual_projection_result'] = write_altirra_embedded_native_interrupted_r_recovery_projection(result)

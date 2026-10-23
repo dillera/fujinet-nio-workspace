@@ -110,6 +110,18 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --native-interrupted-r-recovery-altirra-embedded --timeout 30
 ```
 
+The embedded capacity projection sends the independent 511- and 512-byte raw
+FujiBus packets through the same production endpoint, verifies every byte of
+the patterned 512-byte response and its SIO checksum, and records the actual
+Atari OS retries for the pre-data 513-byte W NAK.  It also requires the
+bounded InternalError response for an oversized core reply; its POKEY capture
+comparison rejects missing, extra, duplicate, or reordered bytes.
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-capacity-bounds-altirra-embedded --timeout 45
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

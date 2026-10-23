@@ -494,6 +494,63 @@ class VirtualProjectionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._assert_capacity_guest_state(run)
 
+    def test_altirra_embedded_capacity_bounds_compares_complete_literal_packets(self):
+        def pokey(direction, value):
+            if direction == "Receive":
+                return f"[SIODATA] [  0] Receive      < ${value:02X}"
+            return f"[SIODATA] [  0] {direction:<8} ${value:02X} >"
+
+        fixtures = {item["id"]: item
+                    for item in projection.load_json(projection.NIO_PATH)["scenarios"]}
+        ids = projection.native_projection_fixture_ids("native-capacity-bounds", self.manifest)
+        lines = []
+        for identifier in ids:
+            # The physical retry count is intentionally not prescribed. Two
+            # identical NAKs here prove the comparator collapses only exact
+            # captured rejected-W attempts.
+            attempts = 2 if identifier == "w-513-rejected" else 1
+            fixture = fixtures[identifier]
+            controls, payload, checksum = projection._fixture_reply(fixture, fixture["command"])
+            for _ in range(attempts):
+                lines.extend(pokey("SendCmd", value) for value in bytes.fromhex(fixture["frame"]))
+                if fixture["command"] == "W" and identifier != "w-513-rejected":
+                    data = projection.fixture_payload(fixture)
+                    lines.extend(pokey("Send", value) for value in data)
+                    lines.append(pokey("Send", int(fixture["payload_checksum"], 16)))
+                response = ((b"A" if fixture["command"] == "W" and
+                             identifier != "w-513-rejected" else b"") +
+                            bytes(controls) + payload +
+                            (bytes((checksum,)) if checksum is not None else b""))
+                lines.extend(pokey("Receive", value) for value in response)
+        trace = "\n".join(lines) + "\n"
+        core_log = "\n".join(
+            f"[fujinetnio-projection] core dispatch fixture route invocation {value}"
+            for value in (1, 2, 3)) + "\n"
+
+        observed = projection.compare_altirra_embedded_native_capacity_bounds(
+            trace, core_log, self.manifest)
+        self.assertEqual([entry["fixture"] for entry in observed], ids)
+        self.assertEqual(observed[6]["response"]["payload"],
+                         projection.fixture_payload(fixtures["r-ready-512"]).hex(" "))
+        self.assertEqual(observed[8]["siov_attempts"], 2)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_capacity_bounds(
+                boot_runner._embedded_capacity_response_mutation(trace), core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_capacity_bounds(
+                boot_runner._embedded_replace_response(
+                    trace, bytes.fromhex("7f 50 00 00 cf"), 1, b"AC\x02\xff\x01\x02"),
+                core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_capacity_bounds(
+                boot_runner._embedded_replace_command(
+                    trace, bytes.fromhex("7f 52 00 02 d3"), 0,
+                    bytes.fromhex("7f 52 ff 01 d3")), core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_capacity_bounds(
+                boot_runner._embedded_capacity_response_mutation(trace, duplicate=True),
+                core_log, self.manifest)
+
     def test_result_is_adapter_scoped_and_missing_evidence_is_incomplete(self):
         with tempfile.TemporaryDirectory() as temporary:
             run = Path(temporary)
