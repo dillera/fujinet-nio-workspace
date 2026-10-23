@@ -17,10 +17,13 @@ class PublicApiClockTests(unittest.TestCase):
             self.assertNotIn(forbidden, source)
         self.assertIn("fn_init()", source)
         self.assertIn("fn_clock_get(&clock_value)", source)
-        self.assertEqual(source.count("fn_raw_call(FN_DEVICE_FILE"), 2)
+        self.assertEqual(source.count("fn_raw_call(FN_DEVICE_FILE"), 3)
         self.assertIn("FNACCEPT_FILE_CMD_WRITE", source)
         self.assertIn("FNACCEPT_FILE_CMD_READ", source)
         self.assertIn("persist:///fnaccept-v1.bin", source)
+        self.assertIn("persist:///fnaccept-recovered-v1.bin", source)
+        self.assertIn("*sdmctl = 0", source)
+        self.assertIn("*dmactl = 0", source)
         for call in ("fn_open(&network_handle", "fn_write(network_handle", "fn_read(network_handle", "fn_close(network_handle"):
             self.assertIn(call, source)
         self.assertIn("fixture://nio-accept", source)
@@ -38,6 +41,35 @@ class PublicApiClockTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._clock_native_commands(trace.replace(" 50 ", " 52 ", 1))
 
+    def test_rejected_file_w_relay_requires_bad_checksum_nak_and_direct_new_w(self):
+        original = bytes((0x7f, ord('W'), 0x30, 0x00))
+        original += bytes((boot_runner._sio_checksum(original),))
+        delivered = original[:-1] + bytes((original[-1] ^ 1,))
+        recovery_w = bytes((0x7f, ord('W'), 0x40, 0x00, 0))
+        commands = [recovery_w,
+                    bytes((0x7f, ord('P'), 0, 0, 0)),
+                    bytes((0x7f, ord('R'), 0, 0, 0)),
+                    recovery_w,
+                    bytes((0x7f, ord('P'), 0, 0, 0)),
+                    bytes((0x7f, ord('R'), 0, 0, 0))]
+        summary = {
+            'failure': None,
+            'rejected_attempts': [{'original': original.hex(' '),
+                                   'delivered': delivered.hex(' ')}],
+            'endpoint_naks': ['01 4e'],
+            'recovery_w_seen': True,
+            'unexpected_recovery_commands': [],
+            'commands_after_rejection': [command.hex(' ') for command in commands],
+        }
+        boot_runner._validate_rejected_file_w_relay(summary)
+        summary['endpoint_naks'].append('01 4e')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_rejected_file_w_relay(summary)
+        summary['endpoint_naks'].pop()
+        summary['commands_after_rejection'][0] = bytes((0x7f, ord('P'), 0, 0, 0)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_rejected_file_w_relay(summary)
+
     def test_expected_cc65_clock_is_full_little_endian_eight_bytes(self):
         self.assertEqual(boot_runner.PUBLIC_API_CLOCK_BYTES,
                          bytes.fromhex("08 07 06 05 04 03 02 01"))
@@ -51,6 +83,10 @@ class PublicApiClockTests(unittest.TestCase):
                              boot_runner.PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES, 512)
         self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES +
                              boot_runner.PUBLIC_API_FILE_READ_PAYLOAD_BYTES, 512)
+        self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES +
+                             boot_runner.PUBLIC_API_FILE_RECOVERY_WRITE_PAYLOAD_BYTES, 512)
+        self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES +
+                             boot_runner.PUBLIC_API_FILE_RECOVERY_READ_PAYLOAD_BYTES, 512)
 
     def test_network_fixture_payloads_and_reply_fit_native_packet_limit(self):
         self.assertEqual(boot_runner.PUBLIC_API_NETWORK_WRITE_MARKER, b"NET-WRITE-24")

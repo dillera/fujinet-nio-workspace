@@ -87,11 +87,24 @@ PUBLIC_API_DISK_READ_STATUS = PUBLIC_API_RESULT + 68
 PUBLIC_API_DISK_WRITE_LENGTH = PUBLIC_API_RESULT + 69
 PUBLIC_API_DISK_READ_LENGTH = PUBLIC_API_RESULT + 71
 PUBLIC_API_DISK_VERIFY = PUBLIC_API_RESULT + 73
+PUBLIC_API_FILE_REJECTED_W_STATUS = PUBLIC_API_RESULT + 74
+PUBLIC_API_FILE_RECOVERY_ATTEMPTED = PUBLIC_API_RESULT + 75
+PUBLIC_API_FILE_RECOVERY_WRITE_STATUS = PUBLIC_API_RESULT + 76
+PUBLIC_API_FILE_RECOVERY_WRITE_DEVICE_STATUS = PUBLIC_API_RESULT + 77
+PUBLIC_API_FILE_RECOVERY_WRITE_RESPONSE_LENGTH = PUBLIC_API_RESULT + 78
+PUBLIC_API_FILE_RECOVERY_WRITE_COUNT = PUBLIC_API_RESULT + 80
+PUBLIC_API_FILE_RECOVERY_VERIFY = PUBLIC_API_RESULT + 82
 PUBLIC_API_FILE_URI = b'persist:///fnaccept-v1.bin'
 PUBLIC_API_FILE_MARKER = b'ATARI-FILE-24'
 PUBLIC_API_FILE_NAME = 'fnaccept-v1.bin'
+PUBLIC_API_FILE_RECOVERY_URI = b'persist:///fnaccept-recovered-v1.bin'
+PUBLIC_API_FILE_RECOVERY_MARKER = b'ATARI-FILE-RECOVERY-24'
+PUBLIC_API_FILE_RECOVERY_NAME = 'fnaccept-recovered-v1.bin'
 PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES = 3 + len(PUBLIC_API_FILE_URI) + 4 + 2 + len(PUBLIC_API_FILE_MARKER)
 PUBLIC_API_FILE_READ_PAYLOAD_BYTES = 3 + len(PUBLIC_API_FILE_URI) + 4 + 2
+PUBLIC_API_FILE_RECOVERY_WRITE_PAYLOAD_BYTES = (3 + len(PUBLIC_API_FILE_RECOVERY_URI) + 4 + 2 +
+                                                len(PUBLIC_API_FILE_RECOVERY_MARKER))
+PUBLIC_API_FILE_RECOVERY_READ_PAYLOAD_BYTES = 3 + len(PUBLIC_API_FILE_RECOVERY_URI) + 4 + 2
 PUBLIC_API_FUJIBUS_HEADER_BYTES = 5
 PUBLIC_API_NETWORK_URI = b'fixture://nio-accept'
 PUBLIC_API_NETWORK_WRITE_MARKER = b'NET-WRITE-24'
@@ -321,6 +334,159 @@ class NetSioTerminalRChecksumRelay:
             'events': self.events,
         }
         path = self.run_dir / 'netsio-terminal-r-relay.json'
+        path.write_text(json.dumps(summary, indent=2) + '\n')
+        return summary, path
+
+
+class NetSioRejectedFileWRelay:
+    """Forward live NetSIO traffic while rejecting one logical File W.
+
+    The public acceptance guest's first native W is Clock and its second is
+    File Write.  This carrier relay changes only that command's SIO checksum
+    before the production endpoint parses it.  Identical OS retries receive
+    the same scoped corruption; once a different W appears, the relay becomes
+    transparent so the guest's distinct recovery operation reaches the real
+    endpoint.  It never manufactures a command reply or a FujiBus response.
+    """
+    def __init__(self, run_dir, listen_port=9997, hub_port=9998):
+        self.run_dir = Path(run_dir)
+        self.hub = ('127.0.0.1', hub_port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(('127.0.0.1', listen_port))
+        self.sock.setblocking(False)
+        self.endpoint = None
+        self.endpoint_registered = threading.Event()
+        self.stop_requested = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='netsio-rejected-file-w-relay', daemon=True)
+        self.native_w_count = 0
+        self.command_active = False
+        self.command_bytes = []
+        self.selected_aux = None
+        self.rejected_attempts = []
+        self.endpoint_naks = []
+        self.commands_after_rejection = []
+        self.recovery_w_seen = False
+        self.unexpected_recovery_commands = []
+        self.failure = None
+        self.events = []
+
+    def _record(self, event, **details):
+        self.events.append({'event': event, **details})
+
+    def start(self):
+        self.thread.start()
+
+    def _complete_command(self, frame):
+        """Classify one reconstructed five-byte SIO command frame."""
+        if len(frame) != 5 or frame[0] != 0x7f:
+            return None
+        command = frame[1]
+        text = frame.hex(' ')
+        if command == ord('W'):
+            self.native_w_count += 1
+            if self.selected_aux is None and self.native_w_count == 2:
+                self.selected_aux = frame[2:4]
+                self._record('selected-file-w', frame=text, aux=self.selected_aux.hex(' '))
+            if self.selected_aux is not None and not self.recovery_w_seen:
+                if frame[2:4] == self.selected_aux:
+                    corrupted = frame[:-1] + bytes((frame[-1] ^ 0x01,))
+                    self.rejected_attempts.append({
+                        'original': text,
+                        'delivered': corrupted.hex(' '),
+                    })
+                    self._record('file-w-checksum-corrupted',
+                                 original=text, delivered=corrupted.hex(' '))
+                    return corrupted[-1]
+                self.recovery_w_seen = True
+                self.commands_after_rejection.append(text)
+                self._record('distinct-recovery-w-forwarded', frame=text)
+                return None
+        if self.selected_aux is not None and not self.recovery_w_seen:
+            self.commands_after_rejection.append(text)
+            if command in (ord('P'), ord('R')):
+                self.unexpected_recovery_commands.append(text)
+                self._record('unexpected-pr-before-recovery-w', frame=text)
+        elif self.recovery_w_seen:
+            self.commands_after_rejection.append(text)
+        return None
+
+    def _from_hub(self, data):
+        """Forward NetSIO packets while editing only a command checksum byte.
+
+        NetSIO may carry the five command bytes as one DATA_BLOCK or as
+        individual DATA_BYTE packets under credit pressure.  Reconstruct only
+        the command window delimited by COMMAND_ON/OFF, preserving every other
+        datagram unchanged.
+        """
+        outgoing = bytearray(data)
+        if data[:1] == b'\x11':
+            self.command_bytes = []
+            self.command_active = True
+            return bytes(outgoing)
+        if data[:1] == b'\x18':
+            self.command_active = False
+            return bytes(outgoing)
+        if not getattr(self, 'command_active', False) or data[:1] not in (b'\x01', b'\x02'):
+            return bytes(outgoing)
+        # The last NetSIO byte is its sequence number, not SIO payload.
+        for index in range(1, len(data) - 1):
+            if len(self.command_bytes) >= 5:
+                break
+            self.command_bytes.append(data[index])
+            if len(self.command_bytes) == 5:
+                replacement = self._complete_command(bytes(self.command_bytes))
+                if replacement is not None:
+                    outgoing[index] = replacement
+        return bytes(outgoing)
+
+    def _run(self):
+        try:
+            while not self.stop_requested.is_set():
+                readable, _, _ = select.select((self.sock,), (), (), .05)
+                if not readable:
+                    continue
+                data, source = self.sock.recvfrom(1024)
+                if source[1] == self.hub[1]:
+                    outgoing = self._from_hub(data)
+                    if self.endpoint is not None:
+                        self.sock.sendto(outgoing, self.endpoint)
+                    continue
+                if self.endpoint is None:
+                    self.endpoint = source
+                    self.endpoint_registered.set()
+                    self._record('endpoint-registered', endpoint=f'{source[0]}:{source[1]}')
+                if source != self.endpoint:
+                    self._record('unexpected-source', endpoint=f'{source[0]}:{source[1]}')
+                    continue
+                # Record only NAKs for the selected logical File write.  A
+                # startup/control NAK is not evidence that the checksum
+                # mutation reached the production endpoint.
+                if (self.selected_aux is not None and not self.recovery_w_seen and
+                        ((data == b'\x01N') or
+                         (len(data) == 6 and data[0] == 0x81 and data[3] == ord('N')))):
+                    self.endpoint_naks.append(data.hex(' '))
+                    self._record('endpoint-nak-forwarded', datagram=data.hex(' '))
+                self.sock.sendto(data, self.hub)
+        except Exception as exc:
+            self.failure = str(exc)
+
+    def stop(self):
+        self.stop_requested.set()
+        self.thread.join(2)
+        self.sock.close()
+        summary = {
+            'format': 'atari-netsio-rejected-file-w-relay-v1',
+            'selected_w_ordinal': 2,
+            'selected_aux': self.selected_aux.hex(' ') if self.selected_aux else None,
+            'rejected_attempts': self.rejected_attempts,
+            'endpoint_naks': self.endpoint_naks,
+            'commands_after_rejection': self.commands_after_rejection,
+            'recovery_w_seen': self.recovery_w_seen,
+            'unexpected_recovery_commands': self.unexpected_recovery_commands,
+            'failure': self.failure,
+            'events': self.events,
+        }
+        path = self.run_dir / 'netsio-rejected-file-w-relay.json'
         path.write_text(json.dumps(summary, indent=2) + '\n')
         return summary, path
 
@@ -886,7 +1052,7 @@ def _read_u16(bridge, address):
     return int.from_bytes(bridge.peek(address, 2), 'little')
 
 
-def inspect_public_api_clock(token, evidence_dir, timeout):
+def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=False):
     """Inspect the public Clock/File/Network guest result and execution."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -911,6 +1077,14 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                     'file_read_response_length': _read_u16(bridge, PUBLIC_API_FILE_READ_RESPONSE_LENGTH),
                     'file_read_count': _read_u16(bridge, PUBLIC_API_FILE_READ_COUNT),
                     'file_verify': bridge.peek(PUBLIC_API_FILE_VERIFY, 1).hex(),
+                    'file_rejected_w_status': bridge.peek(PUBLIC_API_FILE_REJECTED_W_STATUS, 1).hex(),
+                    'file_recovery_attempted': bridge.peek(PUBLIC_API_FILE_RECOVERY_ATTEMPTED, 1).hex(),
+                    'file_recovery_write_status': bridge.peek(PUBLIC_API_FILE_RECOVERY_WRITE_STATUS, 1).hex(),
+                    'file_recovery_write_device_status': bridge.peek(PUBLIC_API_FILE_RECOVERY_WRITE_DEVICE_STATUS, 1).hex(),
+                    'file_recovery_write_response_length': _read_u16(
+                        bridge, PUBLIC_API_FILE_RECOVERY_WRITE_RESPONSE_LENGTH),
+                    'file_recovery_write_count': _read_u16(bridge, PUBLIC_API_FILE_RECOVERY_WRITE_COUNT),
+                    'file_recovery_verify': bridge.peek(PUBLIC_API_FILE_RECOVERY_VERIFY, 1).hex(),
                     'network_open_status': bridge.peek(PUBLIC_API_NETWORK_OPEN_STATUS, 1).hex(),
                     'network_handle': _read_u16(bridge, PUBLIC_API_NETWORK_HANDLE),
                     'network_write_status': bridge.peek(PUBLIC_API_NETWORK_WRITE_STATUS, 1).hex(),
@@ -947,21 +1121,35 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
                 if signature != b'ADP!':
                     raise RuntimeError(f"public API Clock/File/Network/Disk guest failed at stage {state['stage']}")
-                if state['version'] != '04' or state['stage'] != '0d':
+                if state['version'] != '05' or state['stage'] != '0e':
                     raise RuntimeError(f"public API Clock/File/Network/Disk guest has invalid result header: {state}")
                 if state['init_status'] != '00' or state['clock_status'] != '00':
                     raise RuntimeError(f"public API Clock call did not succeed: {state}")
                 if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
                     raise RuntimeError(f"public API Clock value mismatch: {state['clock_value']}")
-                if (state['file_write_status'], state['file_write_device_status'],
-                    state['file_write_response_length'], state['file_write_count']) != (
-                        '00', '00', 10, len(PUBLIC_API_FILE_MARKER)):
+                if rejected_w_recovery:
+                    if (state['file_write_status'] == '00' or
+                            state['file_rejected_w_status'] != state['file_write_status'] or
+                            state['file_recovery_attempted'] != '01' or
+                            (state['file_recovery_write_status'],
+                             state['file_recovery_write_device_status'],
+                             state['file_recovery_write_response_length'],
+                             state['file_recovery_write_count'],
+                             state['file_recovery_verify']) != (
+                                '00', '00', 10, len(PUBLIC_API_FILE_RECOVERY_MARKER), '01')):
+                        raise RuntimeError(f"public API rejected-W File recovery mismatch: {state}")
+                elif (state['file_write_status'], state['file_write_device_status'],
+                      state['file_write_response_length'], state['file_write_count'],
+                      state['file_recovery_attempted']) != (
+                        '00', '00', 10, len(PUBLIC_API_FILE_MARKER), '00'):
                     raise RuntimeError(f"public API File write result mismatch: {state}")
                 if (state['file_read_status'], state['file_read_device_status'],
                     state['file_read_response_length'], state['file_read_count'],
                     state['file_verify']) != (
-                        '00', '00', 10 + len(PUBLIC_API_FILE_MARKER),
-                        len(PUBLIC_API_FILE_MARKER), '01'):
+                        '00', '00', 10 + (len(PUBLIC_API_FILE_RECOVERY_MARKER)
+                                          if rejected_w_recovery else len(PUBLIC_API_FILE_MARKER)),
+                        len(PUBLIC_API_FILE_RECOVERY_MARKER)
+                        if rejected_w_recovery else len(PUBLIC_API_FILE_MARKER), '01'):
                     raise RuntimeError(f"public API File readback result mismatch: {state}")
                 if (state['network_open_status'], state['network_write_status'],
                     state['network_read_status'], state['network_close_status'],
@@ -1001,7 +1189,39 @@ def _clock_native_commands(trace):
     return commands
 
 
-def run_netsio_public_api_clock(timeout, evidence_dir):
+def _sio_checksum(data):
+    total = sum(data)
+    while total > 0xff:
+        total = (total & 0xff) + (total >> 8)
+    return total
+
+
+def _validate_rejected_file_w_relay(summary):
+    """Require literal malformed-W/NAK/direct-new-W relay evidence."""
+    attempts = summary.get('rejected_attempts', ())
+    naks = summary.get('endpoint_naks', ())
+    if summary.get('failure') or not attempts or not naks:
+        raise RuntimeError(f'rejected File W relay did not observe malformed command and NAK: {summary}')
+    if len(naks) != len(attempts):
+        raise RuntimeError(f'rejected File W physical retry/NAK count differs: {summary}')
+    for attempt in attempts:
+        original = bytes.fromhex(attempt['original'])
+        delivered = bytes.fromhex(attempt['delivered'])
+        if (len(original) != 5 or len(delivered) != 5 or original[:4] != delivered[:4] or
+                original[1] != ord('W') or _sio_checksum(original[:4]) != original[4] or
+                _sio_checksum(delivered[:4]) == delivered[4]):
+            raise RuntimeError(f'rejected File W relay has invalid checksum mutation: {attempt}')
+    commands = [bytes.fromhex(frame) for frame in summary.get('commands_after_rejection', ())]
+    if (not summary.get('recovery_w_seen') or summary.get('unexpected_recovery_commands') or
+            not commands or commands[0][1:2] != b'W'):
+        raise RuntimeError(f'rejected File W recovery did not start directly with distinct W: {summary}')
+    # The distinct Write and following Read are normal completed exchanges.
+    if [command[1] for command in commands[:6]] != [ord('W'), ord('P'), ord('R'),
+                                                      ord('W'), ord('P'), ord('R')]:
+        raise RuntimeError(f'rejected File W recovery lacks direct W/P/R order: {summary}')
+
+
+def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False):
     """Run public Clock, File, Network, and Disk calls through NetSIO."""
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
@@ -1010,18 +1230,25 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
     run = (Path(evidence_dir) / 'public-api-clock').resolve()
     run.mkdir(parents=True, exist_ok=True)
     ps = []
+    relay = None
     altirra_log = None
     try:
+        relay = NetSioRejectedFileWRelay(run) if rejected_w_recovery else None
+        if relay:
+            relay.start()
+        hub_port = '9998' if relay else '9997'
         hub = (run / 'hub.log').open('wb')
         nio = (run / 'nio.log').open('wb')
-        ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', '9997'],
+        ps.append(launch([sys.executable, '-u', '-m', 'netsiohub', '-d', '--port', '9996', '--netsio-port', hub_port],
                          cwd=HUB, stdout=hub, stderr=subprocess.STDOUT))
-        wait_log(run / 'hub.log', 'Listening for NetSIO packets on port 9997')
+        wait_log(run / 'hub.log', f'Listening for NetSIO packets on port {hub_port}')
         storage_root = run / 'fujinet-data'
         ps.append(launch([str(PUBLIC_API_CLOCK_ENDPOINT), '--host', '127.0.0.1', '--port', '9997',
                           '--storage-root', str(storage_root)],
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
         wait_log(run / 'nio.log', 'Atari public-API Clock/File/Network/Disk acceptance initialized', timeout=15)
+        if relay and not relay.endpoint_registered.wait(15):
+            raise RuntimeError('rejected File W relay did not register the live production endpoint')
         before = set(Path('/tmp').glob('altirra-bridge-*.token'))
         cmd, env, temps = altirra_command(False, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
         cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
@@ -1029,16 +1256,18 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         ps.append(launch(cmd, cwd=run, env=env, stdout=altirra_log, stderr=subprocess.STDOUT))
         token = fresh_token(before)
         wait_log(run / 'altirra.log', 'NetSIO Cold Reset', timeout=15)
-        cold_reset_after_device_ready(token)
+        if not relay:
+            cold_reset_after_device_ready(token)
         sys.path[:0] = [str(SDK)]
         from altirra_bridge import AltirraBridge
         with AltirraBridge.from_token_file(token) as bridge:
             bridge.resume()
-        state = inspect_public_api_clock(token, run, timeout)
+        state = inspect_public_api_clock(token, run, timeout, rejected_w_recovery)
         altirra_log.flush()
         nio.flush()
         trace = (run / 'nio.log').read_text(errors='replace')
-        state['native_commands'] = _clock_native_commands(trace)
+        state['native_commands'] = (_clock_native_commands(trace) if not rejected_w_recovery else
+                                    re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace))
         if trace.count('ClockDevice routed request') != 1:
             raise RuntimeError('public API Clock did not produce exactly one real ClockDevice dispatch')
         if trace.count('FileDevice routed request') != 2:
@@ -1070,11 +1299,17 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         )
         if not all(expected in trace for expected in expected_disk_dispatches):
             raise RuntimeError('public API Disk dispatch order was not Info/Write/Flush/Read')
-        backing_file = storage_root / PUBLIC_API_FILE_NAME
-        if not backing_file.is_file() or backing_file.read_bytes() != PUBLIC_API_FILE_MARKER:
-            raise RuntimeError('public API File backing store does not retain the guest marker')
+        backing_name = (PUBLIC_API_FILE_RECOVERY_NAME if rejected_w_recovery else
+                        PUBLIC_API_FILE_NAME)
+        backing_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if rejected_w_recovery else
+                          PUBLIC_API_FILE_MARKER)
+        backing_file = storage_root / backing_name
+        if not backing_file.is_file() or backing_file.read_bytes() != backing_marker:
+            raise RuntimeError('public API File backing store does not retain the intended guest marker')
+        if rejected_w_recovery and (storage_root / PUBLIC_API_FILE_NAME).exists():
+            raise RuntimeError('rejected File W unexpectedly created its original backing file')
         state['backing_file'] = str(backing_file)
-        state['backing_file_bytes'] = PUBLIC_API_FILE_MARKER.hex(' ')
+        state['backing_file_bytes'] = backing_marker.hex(' ')
         disk_image = storage_root / PUBLIC_API_DISK_IMAGE_NAME
         disk_offset = PUBLIC_API_DISK_ATR_HEADER_BYTES + PUBLIC_API_DISK_LBA * PUBLIC_API_DISK_SECTOR_BYTES
         disk_bytes = disk_image.read_bytes() if disk_image.is_file() else b''
@@ -1099,8 +1334,16 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         state['expected_clock_bytes'] = PUBLIC_API_CLOCK_BYTES.hex(' ')
         state['expected_network_write'] = PUBLIC_API_NETWORK_WRITE_MARKER.hex(' ')
         state['expected_network_reply'] = PUBLIC_API_NETWORK_REPLY_BYTES.hex(' ')
+        if relay:
+            relay_summary, relay_path = relay.stop()
+            relay = None
+            _validate_rejected_file_w_relay(relay_summary)
+            state['rejected_w_fault'] = relay_summary
+            state['rejected_w_fault_evidence'] = str(relay_path)
         return state
     finally:
+        if relay:
+            relay.stop()
         if altirra_log:
             altirra_log.close()
         if 'hub' in locals():
@@ -1983,12 +2226,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-clock-' if a.public_api_clock else
+        evidence_kind = ('atari-sio-public-api-rejected-w-recovery-' if a.public_api_rejected_w_recovery else
+                         'atari-sio-public-api-clock-' if a.public_api_clock else
                          'atari-sio-native-capacity-bounds-altirra-embedded-' if a.native_capacity_bounds_altirra_embedded else
                          'atari-sio-native-interrupted-r-recovery-altirra-embedded-' if a.native_interrupted_r_recovery_altirra_embedded else
                          'atari-sio-native-reset-to-idle-altirra-embedded-' if a.native_reset_to_idle_altirra_embedded else
@@ -2008,7 +2252,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.public_api_rejected_w_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -2016,9 +2260,10 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_clock:
+    if a.public_api_clock or a.public_api_rejected_w_recovery:
         try:
-            result = run_netsio_public_api_clock(a.timeout, evidence_dir)
+            result = run_netsio_public_api_clock(a.timeout, evidence_dir,
+                                                 rejected_w_recovery=a.public_api_rejected_w_recovery)
             result['outcome'] = 'launch'
         except Exception as exc:
             result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}

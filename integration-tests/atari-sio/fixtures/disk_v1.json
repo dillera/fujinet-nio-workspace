@@ -1097,7 +1097,7 @@
   "scope": "virtual protocol evidence only; no physical timing or electrical claim",
   "source_image": {
     "path": "repos/nio-core-apps/build/atari/disk/boot/autorun.atr",
-    "sha256": "0d824da3bf8addf568af3224de73c89adb0e71eb679f7778c01264a22e751eb6",
+    "sha256": "afd9cb3290dcdf291c47e9d7da586a1624951827fd3e4aa1e933c939340bdb4a",
     "atr_header": "96 02 e8 2c 00 01 00 00 00 00 00 00 00 00 00 00",
     "atr_header_bytes": 16,
     "geometry": "classic-256",

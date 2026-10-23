@@ -393,6 +393,81 @@ Recovery fault injection, conditional PROC evidence, and embedded-Altirra
 public-service acceptance are deliberately still open; this increment does
 not mark Story 2.4 complete.
 
+## Implemented increment: NetSIO public rejected-W recovery
+
+The public acceptance guest now records a bounded rejected-W branch without
+replaying the side-effecting File write.  If its ordinary public
+`fn_raw_call(FN_DEVICE_FILE, WriteFile, ...)` returns a transport error, it
+records that status and issues one *distinct* public File write to
+`persist:///fnaccept-recovered-v1.bin`, with the literal
+`ATARI-FILE-RECOVERY-24` marker.  The following public File read targets that
+new URI.  The application continues to own only documented FileDevice
+application payload encoding; it does not construct FujiBus headers,
+SIOV/DCB commands, or native Q/W/P/R frames.
+
+The result record is version 5 and remains at `$0b00`.  It retains all
+Clock/File/Network/Disk results and adds the original rejected transport
+status, a recovery-attempt flag, recovery Write transport/device statuses,
+response length and transferred count, and recovery verification flag.  A
+normal run records no recovery attempt.  A faulted run must reach `ADP!` at
+stage `$0e`, preserve the original error, and report the distinct Write and
+Read as successful.
+
+The live fault is a narrowly scoped NetSIO carrier relay, not a protocol
+peer: it changes only the selected File-W command checksum while forwarding
+the real guest, hub, production endpoint, and endpoint responses unchanged.
+Atari OS may physically retry a failed command.  The relay therefore corrupts
+each identical retry of that one logical W and requires a corresponding real
+endpoint NAK for every observed retry; it becomes transparent at the first
+different W.  It rejects evidence if a recovery P or R appears before that
+distinct W.  The production log must show exactly two FileDevice dispatches
+(the recovery Write then its Read), never a dispatch or backing file for the
+rejected original URI.  The runner reads the real StorageManager backing
+file and requires only the recovery marker.
+
+The enlarged guest image also uncovered an actual display-list corruption:
+the earlier `$2000` placement allowed its BSS/library state to reach RAM
+scanned by the default Atari OS display list.  `fnaccept` alone now starts at
+`$1d00`; the reviewed link map is STARTUP `$1d00`--`$1d62`, CODE
+`$1d6f`--`$8fdc`, RODATA `$8fdd`--`$9141`, DATA `$9142`--`$917e`, and BSS
+`$917f`--`$9f54` (transport context `$9d0f`).  It is intentionally a headless
+acceptance XEX and disables ANTIC display DMA before public packet buffers are
+touched.  Normal and fault screenshots are consequently clean black frames,
+not corrupted display lists.  The generated configuration ATR whole-image pin
+is now `afd9cb3290dcdf291c47e9d7da586a1624951827fd3e4aa1e933c939340bdb4a`;
+the independent literal D1 boot sectors remain unchanged.
+
+Live evidence:
+
+- `test-evidence/atari-sio-public-api-clock-20261023-202532/` records the
+  unaffected normal version-5 Clock/File/Network/Disk run: `ADP!`, stage
+  `$0e`, eleven ordered W/P/R exchanges, and a clean headless screenshot.
+- `test-evidence/atari-sio-public-api-rejected-w-recovery-20261023-202553/`
+  records the faulted run: `ADP!`, original File transport status `$10`,
+  recovery-attempt `$01`, successful distinct 22-byte Write/Read, no original
+  backing file, and the exact recovery marker in the independently inspected
+  backing file.  Its relay evidence records 56 observed physical malformed-W
+  retry/real-NAK pairs for that one run, no P/R before the distinct recovery
+  W, and transparent subsequent W/P/R exchanges.  The observed retry count is
+  evidence, not a prescribed contract value.
+
+Verification performed:
+
+- Focused public acceptance guards (including checksum-mutation/NAK-count and
+  direct-new-W negative checks) and the complete 41-test Atari fixture/runner
+  suite.
+- Rebuilt the Atari XEX/configuration ATR; full POSIX NetSIO firmware CTest
+  passed (3/3).
+- Live normal `--public-api-clock` and faulted
+  `--public-api-rejected-w-recovery` runs through the production endpoint,
+  plus the explicit-cold-reset D1 page-6 boot regression at
+  `test-evidence/atari-sio-boot-20261023-202642/` (`NIO!` for native and
+  NetSIO).
+
+Malformed/wrong-length R, accepted-but-interrupted R, device-reset recovery,
+conditional PROC, and embedded-Altirra public-service acceptance remain open;
+this increment does not mark Story 2.4 complete.
+
 ## Acceptance criteria
 
 1. A configuration-ATR cc65 XEX built from the normal pipeline proves Clock,
