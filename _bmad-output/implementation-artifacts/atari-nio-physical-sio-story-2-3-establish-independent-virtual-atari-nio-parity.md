@@ -4,10 +4,13 @@ feature: 'atari-nio-physical-sio'
 story: '2.3'
 type: 'feature'
 created: '2026-10-21'
-status: 'in-progress'
+status: 'done'
 baseline_workspace_commit: '2b8c4c37'
 baseline_firmware_commit: '0581bd3f'
 baseline_altirra_commit: '1456ba08'
+completion_audit_workspace_commit: 'eb02ab08'
+completion_audit_firmware_commit: '0167a582affce070038691880fff32ee5778e83d'
+completion_audit_altirra_commit: 'ccefac9556ef031788226435b37573587b52e9b4'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'
@@ -314,8 +317,8 @@ cmake --build build/linux-debug --target AltirraSDL -j2
 # passed
 ```
 
-The cross-adapter projection runner and Story 2.3 completion remain
-intentionally outstanding.
+The subsequent projection increments completed the cross-adapter playback;
+the final acceptance record below supersedes this incremental status.
 
 ## Implementation status: virtual projection infrastructure
 
@@ -350,8 +353,8 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
 # scenario_id=boot-page6-config, status=pass
 ```
 
-Full native operation playback through each virtual adapter remains the next
-Story 2.3 increment; Story 2.3 is not complete.
+The subsequent playback increments completed the live operation families;
+the final acceptance record below supersedes this incremental status.
 
 ## Implementation status: NetSIO native-core-dispatch projection
 
@@ -402,8 +405,8 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
 # existing page-6 native + production-NetSIO boot passed
 ```
 
-The remaining virtual scenario families and all embedded-Altirra projection
-playback remain deliberately outstanding; this does not mark Story 2.3 done.
+The subsequent increments completed the remaining virtual families and the
+embedded-Altirra playback; the final acceptance record below is authoritative.
 
 ## Out of scope
 
@@ -412,3 +415,62 @@ acceptance, physical SIO timing/electrical tests, an Atari hardware run, a new
 FujiBus service or core instance, disk protocol changes, and library changes
 belong elsewhere.  Do not alter the supported legacy firmware family while
 removing it from native-v1 acceptance.
+
+## Final acceptance audit — 2026-10-23
+
+This record supersedes the incremental status notes above.  The audit started
+from workspace `eb02ab08`, firmware
+`0167a582affce070038691880fff32ee5778e83d`, and AltirraSDL
+`ccefac9556ef031788226435b37573587b52e9b4`.
+
+| Acceptance criterion | Implemented evidence |
+| --- | --- |
+| One canonical native-v1 contract for both adapters | `nio_v1.json` supplies literal packet/checksum authority and `nio_v1.virtual.manifest.json` supplies the same stable IDs for `netsio` and `altirra-embedded`. The validator rejects unknown/duplicate IDs, incomplete observations, and legacy `$71`/SLIP/padded/stream paths. |
+| Production endpoint and core routing | The POSIX NetSIO ingress and Altirra `fujinetnio` SIO callbacks both construct the production `AtariSioNioFrontend` with their real `FujinetCore::routingManager()`. Their fixture route is only a deterministic core device behind a parseable FujiBus request; it is not a Q/W/P/R peer. |
+| Required live native families | Both adapters execute `native-core-dispatch`, `native-wrong-r-retention`, `native-reset-to-idle`, `native-interrupted-r-recovery`, and `native-capacity-bounds` from the Atari projection XEX. The captures prove Q/W/P/R framing, ACK/COMPLETE/NAK, exact AUX/count/checksum values, one dispatch per accepted W, wrong-R retention, accepted-R consumption, reset-to-IDLE, 511/512 transfer boundaries, pre-data 513 rejection, and bounded oversized response handling. |
+| Adapter-specific real wire evidence | NetSIO comparison reconstructs the observations from production UDP/NetSIO datagrams. Embedded comparison reconstructs them from Altirra's POKEY/SIO trace. A pass also requires guest `NVP!`, exact fixture comparison, the required core-dispatch count, and all adapter-specific logs, screenshot, inspection, and diagnostics. One adapter's result is never evidence for the other. |
+| Verifier integrity and retained boot lane | Focused negative tests corrupt, omit, duplicate, or reorder observed responses for each adapter/family and require comparison failure. The deterministic D1 page-6 configuration boot still passes through the production NetSIO route. |
+
+The live result schema is explicitly limited to virtual protocol/scheduling
+evidence.  The synchronous endpoint intentionally does not manufacture a
+post-W P(pending) period: pending/timeout and client outstanding-recovery are
+Story 2.1 client evidence, labelled `client-contract` in the projection
+manifest rather than claimed as an endpoint observation here.  Physical SIO
+electrical/timing acceptance remains Epic 3; public Clock/File/Network/Disk
+guest acceptance remains Story 2.4.
+
+### Executed completion verification
+
+```sh
+source scripts/env.sh
+python3 -m unittest discover -s integration-tests/atari-sio/tests -p 'test_*.py'
+# 34 passed (fixture/manifest/result/comparison negative coverage)
+
+repos/fujinet-nio/build/atari-fujibus-netsio-debug/tests/fujinet-nio-tests \
+  --test-case='Atari NetSIO ingress*' --no-skip
+# 2 cases, 88 assertions passed
+ctest --test-dir repos/fujinet-nio/build/atari-fujibus-netsio-debug --output-on-failure
+# 3/3 passed
+
+ctest --test-dir repos/AltirraSDL/build/linux-debug --output-on-failure
+# 17/17 passed
+```
+
+Fresh live runs passed for all five IDs with each adapter, retaining
+timestamped per-run evidence under `test-evidence/`: the NetSIO runs used
+`--native-core-dispatch`, `--native-wrong-r-retention`,
+`--native-reset-to-idle`, `--native-interrupted-r-recovery`, and
+`--native-capacity-bounds`; the embedded runs used the corresponding
+`--*-altirra-embedded` modes.  Each wrote the stable scenario ID and its own
+adapter identity.  The capacity runs compare every byte of the nonconstant
+512-byte response across both pages and validate receive canaries.  The boot
+gate also passed:
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --trace-serial --capture-dcb --explicit-cold-reset \
+  --write-projection-results --timeout 45 --json
+# adapter=netsio, scenario_id=boot-page6-config, status=pass
+```
+
+No independently testable Story 2.3 acceptance criterion remains open.
