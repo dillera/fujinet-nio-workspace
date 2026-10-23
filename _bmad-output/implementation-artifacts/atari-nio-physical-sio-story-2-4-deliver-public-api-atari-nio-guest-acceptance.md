@@ -837,7 +837,45 @@ Fresh independent embedded evidence:
 Verification included the focused embedded CTest, the live embedded public
 acceptance, the Python Atari fixture/runner suite, the existing NetSIO normal
 public acceptance, the full library `make check`, and the D1 page-6 boot gate.
-Story 2.4 remains open: only embedded fault-injection recovery is deferred.
+
+### Embedded rejected-W recovery
+
+The same embedded composition now has a narrowly scoped, opt-in
+`publicacceptancerejectfilew` acceptance setting.  It applies only with
+`publicacceptancefixture`, only to the original 54-byte File Write W command,
+and only after Altirra has delivered its real SIO callback but before that
+canonical frame reaches the production `AtariSioNioFrontend`.  The setting
+flips the command-frame checksum from `$0d` to `$0c`; it never supplies a
+replacement request, constructs a response, or bypasses the frontend.  The
+distinct recovery File Write is 73 bytes, so it cannot match this fault.
+
+The live guest issued 28 physical OS retries of guest-visible
+`7f 57 36 00 0d`.  Each was logged as a `$0d` to `$0c` delivery corruption and
+received a real frontend NAK before a data phase.  No original File request
+was routed or persisted.  The public call recorded transport failure `$10`;
+the guest then issued its distinct `7f 57 49 00 20` recovery write directly,
+with no P/R between the final rejected attempt and that W.  The production
+core routed exactly the recovery File Write/Read pair, its backing file held
+only `ATARI-FILE-RECOVERY-24`, and the original backing filename was absent.
+Network, Disk, heartbeat, `ADP!`, explicit Q flags `$00`, and PROC
+`not-advertised` all remained independently verified.
+
+The runner rejects absent/mismatched fault log events, accepted or data-bearing
+original W attempts, missing NAKs, noncontiguous retries, P/R before recovery
+W, extra File dispatches, original-file persistence, and a false successful
+guest recovery state.  Its focused tests mutate the NAK, remove the corruption
+event, insert an unexpected P, and add a duplicate File dispatch.
+
+Fresh evidence:
+
+- `test-evidence/atari-sio-public-api-rejected-w-recovery-altirra-embedded-20261023-234958/`
+  contains guest RAM inspection, screenshot, Altirra diagnostics, POKEY trace,
+  real-core routing log, persistent File/Disk inspection, and
+  `embedded-public-rejected-w-fault.json` binding every physical NAK to its
+  delivered bad checksum.
+
+Story 2.4 remains open: embedded malformed-length-R, accepted-but-interrupted
+R, and reset recovery are still deferred.
 
 ## Out of scope
 

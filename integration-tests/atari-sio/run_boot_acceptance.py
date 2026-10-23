@@ -2329,12 +2329,31 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         stop(ps)
 
 
-def _validate_embedded_public_api_trace(pokey):
+def _validate_embedded_public_api_trace(pokey, rejected_w_recovery=False):
     """Verify every public-service native frame from Altirra's real POKEY path."""
     windows = _embedded_native_windows(pokey)
+    commands = [window[0] for window in windows]
     expected_commands = [ord('Q')] + [value for _ in range(11)
                                      for value in (ord('W'), ord('P'), ord('R'))]
-    commands = [window[0] for window in windows]
+    rejected_windows = []
+    if rejected_w_recovery:
+        if len(commands) < 5 or [frame[1] for frame in commands[:4]] != [ord('Q'), ord('W'), ord('P'), ord('R')]:
+            raise RuntimeError('embedded rejected-W capture lacks Q then the Clock W/P/R exchange')
+        cursor = 4
+        rejected_command = bytes.fromhex('7f 57 36 00 0d')
+        while cursor < len(commands) and commands[cursor] == rejected_command:
+            rejected_windows.append(windows[cursor])
+            cursor += 1
+        if not rejected_windows:
+            raise RuntimeError('embedded rejected-W capture lacks the selected original File W')
+        expected_commands = ([ord('Q'), ord('W'), ord('P'), ord('R')] +
+                             [ord('W')] * len(rejected_windows) +
+                             [value for _ in range(10) for value in (ord('W'), ord('P'), ord('R'))])
+        if len(commands) != len(expected_commands) or [frame[1] for frame in commands] != expected_commands:
+            raise RuntimeError('embedded rejected-W capture has extra, missing, or reordered native commands')
+        operation_starts = [1] + [cursor + index * 3 for index in range(10)]
+    else:
+        operation_starts = [1 + index * 3 for index in range(11)]
     if len(commands) != len(expected_commands) or [frame[1] for frame in commands] != expected_commands:
         raise RuntimeError('embedded public API capture has missing, extra, or reordered native commands')
     if any(frame[0] != 0x7f or _sio_checksum(frame[:4]) != frame[4] for frame in commands):
@@ -2355,6 +2374,14 @@ def _validate_embedded_public_api_trace(pokey):
         raise RuntimeError('embedded public API capability Q is not an exact native-v1 exchange')
     observed.append({'command': q_command.hex(' '), 'sent': '', 'received': q_received.hex(' ')})
 
+    for command, begin, end in rejected_windows:
+        text = pokey[begin:end]
+        sent = bytes(int(value, 16) for value in re.findall(r"\bSend\s+\$([0-9A-F]{2})", text))
+        received = bytes(int(value, 16) for value in re.findall(r"Receive\s+< \$([0-9A-F]{2})", text))
+        if sent or received != b'N':
+            raise RuntimeError('embedded selected File W was not NAKed before any data phase')
+        observed.append({'command': command.hex(' '), 'sent': '', 'received': received.hex(' ')})
+
     expected_services = [
         (0x45, 0x01),             # Clock Get
         (0xfe, 0x04), (0xfe, 0x03),
@@ -2364,9 +2391,10 @@ def _validate_embedded_public_api_trace(pokey):
     writes = []
     replies = []
     for operation, service in enumerate(expected_services):
-        write = window_bytes(windows[1 + operation * 3])
-        poll = window_bytes(windows[2 + operation * 3])
-        read = window_bytes(windows[3 + operation * 3])
+        start = operation_starts[operation]
+        write = window_bytes(windows[start])
+        poll = window_bytes(windows[start + 1])
+        read = window_bytes(windows[start + 2])
         command, sent, received = write
         if command[1] != ord('W') or received != b'AAC':
             raise RuntimeError(f'embedded public operation {operation} lacks exact W ACK/ACK/COMPLETE')
@@ -2405,15 +2433,18 @@ def _validate_embedded_public_api_trace(pokey):
             {'command': r_command.hex(' '), 'sent': '', 'received': r_received.hex(' ')},
         ))
 
-    if (writes[1] != _file_write_packet(PUBLIC_API_FILE_URI, PUBLIC_API_FILE_MARKER) or
-            PUBLIC_API_FILE_URI not in writes[2] or
+    expected_file_uri = PUBLIC_API_FILE_RECOVERY_URI if rejected_w_recovery else PUBLIC_API_FILE_URI
+    expected_file_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if rejected_w_recovery
+                            else PUBLIC_API_FILE_MARKER)
+    if (writes[1] != _file_write_packet(expected_file_uri, expected_file_marker) or
+            expected_file_uri not in writes[2] or
             writes[2].endswith(PUBLIC_API_FILE_MARKER) or
             PUBLIC_API_NETWORK_URI not in writes[3] or
             PUBLIC_API_NETWORK_WRITE_MARKER not in writes[4] or
             writes[8][-PUBLIC_API_DISK_SECTOR_BYTES:] != PUBLIC_API_DISK_PATTERN):
         raise RuntimeError('embedded public API capture does not carry the literal File/Network/Disk requests')
     if (not replies[0].endswith(PUBLIC_API_CLOCK_BYTES) or
-            PUBLIC_API_FILE_MARKER not in replies[2] or
+            expected_file_marker not in replies[2] or
             PUBLIC_API_NETWORK_REPLY_BYTES not in replies[5] or
             replies[10][-PUBLIC_API_DISK_SECTOR_BYTES:] != PUBLIC_API_DISK_PATTERN):
         raise RuntimeError('embedded public API capture does not carry the canonical service responses')
@@ -2451,7 +2482,53 @@ def _validate_embedded_public_core_log(trace):
         raise RuntimeError('embedded public acceptance core dispatch ordering is incomplete')
 
 
-def run_altirra_embedded_public_api_clock(timeout, evidence_dir):
+def _validate_embedded_rejected_file_w_fault(pokey, trace):
+    """Bind each guest-visible NAK to a corrupted frontend command frame."""
+    windows = _embedded_native_windows(pokey)
+    selected = bytes.fromhex('7f 57 36 00 0d')
+    recovery = bytes.fromhex('7f 57 49 00 20')
+    selected_positions = [index for index, (command, _, _) in enumerate(windows)
+                          if command == selected]
+    if not selected_positions:
+        raise RuntimeError('embedded rejected-W evidence has no selected original File command')
+    if selected_positions != list(range(selected_positions[0], selected_positions[-1] + 1)):
+        raise RuntimeError('embedded rejected-W physical retries are not contiguous')
+    recovery_positions = [index for index, (command, _, _) in enumerate(windows)
+                          if command == recovery]
+    if len(recovery_positions) != 1 or recovery_positions[0] <= selected_positions[-1]:
+        raise RuntimeError('embedded rejected-W evidence lacks one distinct recovery File W')
+    if any(windows[index][0][1] in (ord('P'), ord('R'))
+           for index in range(selected_positions[-1] + 1, recovery_positions[0])):
+        raise RuntimeError('embedded rejected-W recovery attempted P/R before its distinct W')
+    for index in selected_positions:
+        _, begin, end = windows[index]
+        window = pokey[begin:end]
+        sent = re.findall(r"\bSend\s+\$([0-9A-F]{2})", window)
+        received = re.findall(r"Receive\s+< \$([0-9A-F]{2})", window)
+        if sent or received != ['4E']:
+            raise RuntimeError('embedded rejected-W attempt was not a real pre-data NAK')
+    events = re.findall(
+        r'fault: File W command checksum ([0-9a-f]{2}) delivered as ([0-9a-f]{2}) attempt=(\d+)',
+        trace, flags=re.IGNORECASE)
+    if len(events) != len(selected_positions):
+        raise RuntimeError('embedded rejected-W fault logs do not match physical SIO attempts')
+    normalized = [(original.lower(), delivered.lower(), int(attempt))
+                  for original, delivered, attempt in events]
+    if (any(original != '0d' or delivered == original for original, delivered, _ in normalized) or
+            [attempt for _, _, attempt in normalized] != list(range(1, len(normalized) + 1))):
+        raise RuntimeError('embedded rejected-W fault did not corrupt every selected command checksum')
+    return {
+        'kind': 'altirra-embedded-public-file-w-command-checksum-corruption',
+        'guest_command': selected.hex(' '),
+        'recovery_command': recovery.hex(' '),
+        'physical_attempts': len(selected_positions),
+        'attempts': [{'original_checksum': original, 'delivered_checksum': delivered,
+                      'attempt': attempt, 'nak': True}
+                     for original, delivered, attempt in normalized],
+    }
+
+
+def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False):
     """Run the public cc65 guest through Altirra's embedded production device."""
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
@@ -2461,7 +2538,10 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir):
     config_dir.mkdir(exist_ok=True)
     before = set(Path('/tmp').glob('altirra-bridge-*.token'))
     cmd, env, temps = altirra_command(True, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
-    cmd.extend(['--adddevice', f'fujinetnio,configdir={config_dir},publicacceptancefixture=true',
+    device_settings = f'fujinetnio,configdir={config_dir},publicacceptancefixture=true'
+    if rejected_w_recovery:
+        device_settings += ',publicacceptancerejectfilew=true'
+    cmd.extend(['--adddevice', device_settings,
                 '--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
     altirra_log = (run / 'altirra.log').open('wb')
     process = None
@@ -2475,10 +2555,13 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir):
         with AltirraBridge.from_token_file(token) as bridge:
             device = bridge.device_get('fujinetnio')
             if (not device.get('present') or not device.get('healthy') or
-                    not device.get('settings', {}).get('publicacceptancefixture')):
+                    not device.get('settings', {}).get('publicacceptancefixture') or
+                    (rejected_w_recovery and not device.get('settings', {}).get(
+                        'publicacceptancerejectfilew'))):
                 raise RuntimeError(f'embedded public acceptance device is not healthy/configured: {device}')
             bridge.resume()
-        state = inspect_public_api_clock(token, run, timeout)
+        state = inspect_public_api_clock(token, run, timeout,
+                                         rejected_w_recovery=rejected_w_recovery)
         altirra_log.flush()
         pokey_path = run / 'pokey-siodata.log'
         if not pokey_path.exists() or not pokey_path.stat().st_size:
@@ -2490,13 +2573,27 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir):
         pokey = pokey_path.read_text(errors='replace')
         trace = (run / 'altirra.log').read_text(errors='replace')
         state['adapter'] = 'altirra-embedded'
-        state['native_observations'] = _validate_embedded_public_api_trace(pokey)
+        state['native_observations'] = _validate_embedded_public_api_trace(
+            pokey, rejected_w_recovery=rejected_w_recovery)
         state['capability_wire'] = state['native_observations'][0]
         _validate_embedded_public_core_log(trace)
 
-        backing_file = config_dir / PUBLIC_API_FILE_NAME
-        if not backing_file.is_file() or backing_file.read_bytes() != PUBLIC_API_FILE_MARKER:
+        if rejected_w_recovery:
+            fault = _validate_embedded_rejected_file_w_fault(pokey, trace)
+            fault_path = run / 'embedded-public-rejected-w-fault.json'
+            fault_path.write_text(json.dumps(fault, indent=2) + '\n')
+            state['rejected_w_fault'] = fault
+            state['rejected_w_fault_evidence'] = str(fault_path)
+
+        backing_name = (PUBLIC_API_FILE_RECOVERY_NAME if rejected_w_recovery
+                        else PUBLIC_API_FILE_NAME)
+        backing_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if rejected_w_recovery
+                          else PUBLIC_API_FILE_MARKER)
+        backing_file = config_dir / backing_name
+        if not backing_file.is_file() or backing_file.read_bytes() != backing_marker:
             raise RuntimeError('embedded public acceptance File backing store lacks the guest marker')
+        if rejected_w_recovery and (config_dir / PUBLIC_API_FILE_NAME).exists():
+            raise RuntimeError('embedded rejected-W acceptance unexpectedly persisted the original File write')
         disk_image = config_dir / PUBLIC_API_DISK_IMAGE_NAME
         disk_bytes = disk_image.read_bytes() if disk_image.is_file() else b''
         disk_offset = PUBLIC_API_DISK_ATR_HEADER_BYTES + PUBLIC_API_DISK_LBA * PUBLIC_API_DISK_SECTOR_BYTES
@@ -3391,12 +3488,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-reset-recovery-' if a.public_api_reset_recovery else
+        evidence_kind = ('atari-sio-public-api-rejected-w-recovery-altirra-embedded-' if a.public_api_rejected_w_recovery_altirra_embedded else
+                         'atari-sio-public-api-reset-recovery-' if a.public_api_reset_recovery else
                          'atari-sio-public-api-interrupted-r-recovery-' if a.public_api_interrupted_r_recovery else
                          'atari-sio-public-api-malformed-r-recovery-' if a.public_api_malformed_r_recovery else
                          'atari-sio-public-api-rejected-w-recovery-' if a.public_api_rejected_w_recovery else
@@ -3421,7 +3519,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -3429,7 +3527,18 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_clock_altirra_embedded:
+    if a.public_api_rejected_w_recovery_altirra_embedded:
+        try:
+            result = run_altirra_embedded_public_api_clock(
+                a.timeout, evidence_dir, rejected_w_recovery=True)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.public_api_clock_altirra_embedded:
         try:
             result = run_altirra_embedded_public_api_clock(a.timeout, evidence_dir)
             result['outcome'] = 'launch'

@@ -94,6 +94,43 @@ class PublicApiClockTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._validate_rejected_file_w_relay(summary)
 
+    def test_embedded_rejected_w_requires_corruption_naks_and_direct_recovery_w(self):
+        def window(frame, receives):
+            lines = [f"[SIODATA] SendCmd  ${value:02X} >" for value in frame]
+            lines.extend(f"[SIODATA] Receive      < ${value:02X}" for value in receives)
+            return '\n'.join(lines) + '\n'
+
+        rejected = bytes.fromhex('7f 57 36 00 0d')
+        recovery = bytes.fromhex('7f 57 49 00 20')
+        pokey = window(rejected, b'N') + window(rejected, b'N') + window(recovery, b'A')
+        log = '\n'.join((
+            'fault: File W command checksum 0d delivered as 0c attempt=1',
+            'fault: File W command checksum 0d delivered as 0c attempt=2',
+        ))
+        fault = boot_runner._validate_embedded_rejected_file_w_fault(pokey, log)
+        self.assertEqual(fault['physical_attempts'], 2)
+        self.assertTrue(all(attempt['nak'] for attempt in fault['attempts']))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_rejected_file_w_fault(pokey, '')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_rejected_file_w_fault(
+                pokey.replace('Receive      < $4E', 'Receive      < $41', 1), log)
+        premature_poll = pokey.replace(window(recovery, b'A'),
+                                       window(bytes.fromhex('7f 50 00 00 cf'), b'') +
+                                       window(recovery, b'A'))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_rejected_file_w_fault(premature_poll, log)
+        core_log = '\n'.join((
+            'ClockDevice routed request',
+            'FileDevice routed request', 'FileDevice routed request',
+            'NetworkDevice routed request', 'NetworkDevice routed request',
+            'NetworkDevice routed request', 'NetworkDevice routed request',
+            'DiskDevice routed request', 'DiskDevice routed request',
+            'DiskDevice routed request', 'DiskDevice routed request',
+        ))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_core_log(core_log + '\nFileDevice routed request')
+
     def test_ready_length_relay_requires_retained_response_drain_before_new_w(self):
         def frame(command, aux=0):
             value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))
