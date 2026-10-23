@@ -719,6 +719,226 @@ class NetSioReadyLengthRelay(NetSioRejectedFileWRelay):
         path.write_text(json.dumps(summary, indent=2) + '\n')
         return summary, path
 
+
+class NetSioPublicTerminalRChecksumRelay(NetSioRejectedFileWRelay):
+    """Corrupt only a consumed public File Write terminal-R delivery.
+
+    The relay selects the public guest's second native W (the original File
+    Write), lets its real P(READY) and correct-length R reach the production
+    endpoint, then changes only the final SIO checksum travelling back to
+    Altirra.  It records any OS R retries, which must be NAKed because the
+    frontend consumed the response before the downstream corruption.  The
+    later public call must observe P(IDLE) before its distinct W.
+    """
+    def __init__(self, run_dir, listen_port=9997, hub_port=9998):
+        super().__init__(run_dir, listen_port, hub_port)
+        self.thread = threading.Thread(target=self._run,
+                                       name='netsio-public-terminal-r-relay', daemon=True)
+        self.selected = False
+        self.command_frames = []
+        self.pending_w_payload = None
+        self.w_payloads = {}
+        self.w_checksums = {}
+        self.initial_p_seen = False
+        self.awaiting_ready_payload = False
+        self.awaiting_ready_checksum = False
+        self.ready_payload = None
+        self.ready_checksum = None
+        self.terminal_r_forwarded = False
+        self.terminal_r_frame = None
+        self.terminal_r_controls = []
+        self.terminal_r_response = None
+        self.terminal_r_checksum = None
+        self.terminal_r_delivered_checksum = None
+        self.fault_applied = False
+        self.terminal_r_retries = []
+        self.terminal_r_retry_naks = []
+        self.awaiting_idle_payload = False
+        self.awaiting_idle_checksum = False
+        self.idle_payload = None
+        self.idle_checksum = None
+        self.idle_controls = []
+        self.idle_p_seen = False
+        self.distinct_w_seen = False
+
+    def _complete_command(self, frame):
+        if len(frame) != 5 or frame[0] != 0x7f:
+            return None
+        command = frame[1]
+        text = frame.hex(' ')
+        if command == ord('W'):
+            self.native_w_count += 1
+            if self.native_w_count == 2:
+                self.selected = True
+                self.selected_aux = frame[2:4]
+                self.pending_w_payload = 'initial'
+                self._record('selected-file-w', frame=text,
+                             aux=self.selected_aux.hex(' '))
+            elif self.selected and self.idle_p_seen and not self.distinct_w_seen:
+                self.distinct_w_seen = True
+                self.pending_w_payload = 'distinct'
+                self._record('distinct-file-w-forwarded', frame=text,
+                             aux=frame[2:4].hex(' '))
+            elif self.selected and self.fault_applied and not self.idle_p_seen:
+                self._record('unexpected-w-before-idle', frame=text)
+        if not self.selected:
+            return None
+        self.command_frames.append(text)
+        if command == ord('P'):
+            if not self.initial_p_seen:
+                self.initial_p_seen = True
+                self.awaiting_ready_payload = True
+                self._record('selected-ready-p-forwarded', frame=text)
+            elif self.fault_applied and not self.idle_p_seen:
+                self.awaiting_idle_payload = True
+                self._record('post-interruption-p-forwarded', frame=text)
+        elif command == ord('R'):
+            if not self.terminal_r_forwarded:
+                self.terminal_r_forwarded = True
+                self.terminal_r_frame = text
+                self._record('accepted-terminal-r-forwarded', frame=text,
+                             aux=frame[2] | (frame[3] << 8))
+            elif self.fault_applied and not self.idle_p_seen:
+                self.terminal_r_retries.append(text)
+                self._record('consumed-terminal-r-retry-forwarded', frame=text,
+                             aux=frame[2] | (frame[3] << 8))
+        return None
+
+    def _from_hub(self, data):
+        outgoing = super()._from_hub(data)
+        if self.pending_w_payload and not self.command_active:
+            if data[:1] == b'\x02' and len(data) > 2:
+                self.w_payloads.setdefault(self.pending_w_payload, bytearray()).extend(data[1:-1])
+            elif data[:1] in (b'\x01', b'\x09') and len(data) >= 2:
+                self.w_checksums[self.pending_w_payload] = data[1]
+                self._record('file-w-data-forwarded', which=self.pending_w_payload,
+                             payload=bytes(self.w_payloads.get(self.pending_w_payload, ())).hex(' '),
+                             checksum=f'{data[1]:02x}')
+                self.pending_w_payload = None
+        return outgoing
+
+    @staticmethod
+    def _is_nak(data):
+        return data == b'\x01N' or (len(data) == 6 and data[0] == 0x81 and data[3] == ord('N'))
+
+    def _from_endpoint(self, data):
+        outgoing = bytearray(data)
+        if self.awaiting_ready_payload and data[:1] == b'\x02':
+            payload = bytes(data[1:])
+            if len(payload) != 3 or payload[0] != 2 or not (payload[1] or payload[2]):
+                self.failure = f'expected initial READY P payload, received {data.hex(" ")}'
+            else:
+                self.ready_payload = payload
+                self.awaiting_ready_payload = False
+                self.awaiting_ready_checksum = True
+                self._record('ready-forwarded', payload=payload.hex(' '))
+        elif self.awaiting_ready_checksum and len(data) == 2 and data[0] == 0x01:
+            self.ready_checksum = data[1]
+            self.awaiting_ready_checksum = False
+            self._record('ready-checksum-forwarded', checksum=f'{data[1]:02x}')
+
+        if self.terminal_r_forwarded and not self.fault_applied:
+            if len(data) == 6 and data[0] == 0x81 and data[2:4] == b'\x01A':
+                self.terminal_r_controls.append('A')
+            elif data == b'\x01C':
+                self.terminal_r_controls.append('C')
+            elif data[:1] == b'\x02':
+                self.terminal_r_response = bytes(data[1:])
+                self._record('accepted-terminal-r-response-forwarded',
+                             payload=self.terminal_r_response.hex(' '))
+            elif (self.terminal_r_response is not None and len(data) == 2 and
+                  data[0] == 0x01):
+                self.terminal_r_checksum = data[1]
+                outgoing[1] ^= 0x01
+                self.terminal_r_delivered_checksum = outgoing[1]
+                self.fault_applied = True
+                self._record('terminal-r-checksum-corrupted', original=f'{data[1]:02x}',
+                             delivered=f'{outgoing[1]:02x}')
+
+        if (self.fault_applied and self.terminal_r_retries and not self.idle_p_seen and
+                self._is_nak(data)):
+            self.terminal_r_retry_naks.append(data.hex(' '))
+            self._record('consumed-terminal-r-retry-nak-forwarded', datagram=data.hex(' '))
+
+        if self.awaiting_idle_payload and data[:1] == b'\x02':
+            payload = bytes(data[1:])
+            if payload != b'\0\0\0':
+                self.failure = f'expected post-interruption P(IDLE), received {data.hex(" ")}'
+            else:
+                self.idle_payload = payload
+                self.idle_p_seen = True
+                self.awaiting_idle_payload = False
+                self.awaiting_idle_checksum = True
+                self._record('post-interruption-idle-forwarded', payload=payload.hex(' '))
+        elif self.awaiting_idle_checksum and len(data) == 2 and data[0] == 0x01:
+            self.idle_checksum = data[1]
+            self.awaiting_idle_checksum = False
+            self._record('post-interruption-idle-checksum-forwarded', checksum=f'{data[1]:02x}')
+        if self.awaiting_idle_payload or self.awaiting_idle_checksum:
+            if len(data) == 6 and data[0] == 0x81 and data[2:4] == b'\x01A':
+                self.idle_controls.append('A')
+            elif data == b'\x01C':
+                self.idle_controls.append('C')
+        return bytes(outgoing)
+
+    def _run(self):
+        try:
+            while not self.stop_requested.is_set():
+                readable, _, _ = select.select((self.sock,), (), (), .05)
+                if not readable:
+                    continue
+                data, source = self.sock.recvfrom(1024)
+                if source[1] == self.hub[1]:
+                    outgoing = self._from_hub(data)
+                    if self.endpoint is not None:
+                        self.sock.sendto(outgoing, self.endpoint)
+                    continue
+                if self.endpoint is None:
+                    self.endpoint = source
+                    self.endpoint_registered.set()
+                    self._record('endpoint-registered', endpoint=f'{source[0]}:{source[1]}')
+                if source != self.endpoint:
+                    self._record('unexpected-source', endpoint=f'{source[0]}:{source[1]}')
+                    continue
+                self.sock.sendto(self._from_endpoint(data), self.hub)
+        except Exception as exc:
+            self.failure = str(exc)
+
+    def stop(self):
+        self.stop_requested.set()
+        self.thread.join(2)
+        self.sock.close()
+        summary = {
+            'format': 'atari-netsio-public-terminal-r-checksum-relay-v1',
+            'selected_w_ordinal': 2,
+            'selected_aux': self.selected_aux.hex(' ') if self.selected_aux else None,
+            'command_frames': self.command_frames,
+            'w_payloads': {key: bytes(value).hex(' ') for key, value in self.w_payloads.items()},
+            'w_checksums': self.w_checksums,
+            'ready_payload': self.ready_payload.hex(' ') if self.ready_payload else None,
+            'ready_checksum': self.ready_checksum,
+            'terminal_r_frame': self.terminal_r_frame,
+            'terminal_r_controls': self.terminal_r_controls,
+            'terminal_r_response': (self.terminal_r_response.hex(' ')
+                                    if self.terminal_r_response else None),
+            'terminal_r_checksum': self.terminal_r_checksum,
+            'terminal_r_delivered_checksum': self.terminal_r_delivered_checksum,
+            'fault_applied': self.fault_applied,
+            'terminal_r_retries': self.terminal_r_retries,
+            'terminal_r_retry_naks': self.terminal_r_retry_naks,
+            'idle_payload': self.idle_payload.hex(' ') if self.idle_payload else None,
+            'idle_checksum': self.idle_checksum,
+            'idle_controls': self.idle_controls,
+            'idle_p_seen': self.idle_p_seen,
+            'distinct_w_seen': self.distinct_w_seen,
+            'failure': self.failure,
+            'events': self.events,
+        }
+        path = self.run_dir / 'netsio-public-terminal-r-relay.json'
+        path.write_text(json.dumps(summary, indent=2) + '\n')
+        return summary, path
+
+
 def inspect_launch(token, evidence_dir=None):
     sys.path[:0]=[str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -1281,8 +1501,24 @@ def _read_u16(bridge, address):
     return int.from_bytes(bridge.peek(address, 2), 'little')
 
 
+def _validate_public_file_recovery_state(state):
+    """A failed public exchange must stay failed while its distinct write works."""
+    if (state['file_write_status'] == '00' or
+            state['file_rejected_w_status'] != state['file_write_status'] or
+            state['file_failure_status'] != state['file_write_status'] or
+            state['file_recovery_attempted'] != '01' or
+            state['file_recovery_kind'] != '01' or
+            (state['file_recovery_write_status'],
+             state['file_recovery_write_device_status'],
+             state['file_recovery_write_response_length'],
+             state['file_recovery_write_count'],
+             state['file_recovery_verify']) != (
+                '00', '00', 10, len(PUBLIC_API_FILE_RECOVERY_MARKER), '01')):
+        raise RuntimeError(f"public API failed-File recovery mismatch: {state}")
+
+
 def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=False,
-                             malformed_r_recovery=False):
+                             malformed_r_recovery=False, interrupted_r_recovery=False):
     """Inspect the public Clock/File/Network guest result and execution."""
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
@@ -1376,19 +1612,8 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                     raise RuntimeError(f"public API Clock call did not succeed: {state}")
                 if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
                     raise RuntimeError(f"public API Clock value mismatch: {state['clock_value']}")
-                if rejected_w_recovery or malformed_r_recovery:
-                    if (state['file_write_status'] == '00' or
-                            state['file_rejected_w_status'] != state['file_write_status'] or
-                            state['file_failure_status'] != state['file_write_status'] or
-                            state['file_recovery_attempted'] != '01' or
-                            state['file_recovery_kind'] != '01' or
-                            (state['file_recovery_write_status'],
-                             state['file_recovery_write_device_status'],
-                             state['file_recovery_write_response_length'],
-                             state['file_recovery_write_count'],
-                             state['file_recovery_verify']) != (
-                                '00', '00', 10, len(PUBLIC_API_FILE_RECOVERY_MARKER), '01')):
-                        raise RuntimeError(f"public API failed-File recovery mismatch: {state}")
+                if rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery:
+                    _validate_public_file_recovery_state(state)
                 elif (state['file_write_status'], state['file_write_device_status'],
                       state['file_write_response_length'], state['file_write_count'],
                       state['file_recovery_attempted']) != (
@@ -1398,10 +1623,10 @@ def inspect_public_api_clock(token, evidence_dir, timeout, rejected_w_recovery=F
                     state['file_read_response_length'], state['file_read_count'],
                     state['file_verify']) != (
                         '00', '00', 10 + (len(PUBLIC_API_FILE_RECOVERY_MARKER)
-                                          if (rejected_w_recovery or malformed_r_recovery)
+                                          if (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery)
                                           else len(PUBLIC_API_FILE_MARKER)),
                         len(PUBLIC_API_FILE_RECOVERY_MARKER)
-                        if (rejected_w_recovery or malformed_r_recovery)
+                        if (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery)
                         else len(PUBLIC_API_FILE_MARKER), '01'):
                     raise RuntimeError(f"public API File readback result mismatch: {state}")
                 if (state['network_open_status'], state['network_write_status'],
@@ -1547,10 +1772,81 @@ def _validate_ready_length_relay(summary):
         raise RuntimeError(f'retained terminal-R raw packet/checksum is not exact: {summary}')
 
 
+def _file_write_packet(uri, marker):
+    body = (bytes((1, len(uri) & 0xff, len(uri) >> 8)) + uri + b'\0\0\0\0' +
+            bytes((len(marker) & 0xff, len(marker) >> 8)) + marker)
+    packet = bytearray((0xfe, 4, (6 + len(body)) & 0xff, (6 + len(body)) >> 8, 0, 0)) + body
+    packet[4] = _sio_checksum(packet[:4] + packet[5:])
+    return bytes(packet)
+
+
+def _file_write_response(marker):
+    # The production FileDevice v1 WriteFile response is a real FujiBus
+    # response, not a relay fixture: status=OK followed by version, flags,
+    # reserved, offset=0, and the documented written length.
+    body = bytes((0, 1, 0, 0, 0, 0, 0, 0, 0, len(marker), 0))
+    packet = bytearray((0xfe, 4, (6 + len(body)) & 0xff, (6 + len(body)) >> 8, 0, 1)) + body
+    packet[4] = _sio_checksum(packet[:4] + packet[5:])
+    return bytes(packet)
+
+
+def _validate_public_terminal_r_relay(summary):
+    """Require accepted-R consumption, corrupted delivery, P(IDLE), then W."""
+    if summary.get('failure') or not summary.get('fault_applied'):
+        raise RuntimeError(f'public terminal-R relay did not corrupt a live accepted response: {summary}')
+    expected_w = {
+        'initial': _file_write_packet(PUBLIC_API_FILE_URI, PUBLIC_API_FILE_MARKER),
+        'distinct': _file_write_packet(PUBLIC_API_FILE_RECOVERY_URI,
+                                       PUBLIC_API_FILE_RECOVERY_MARKER),
+    }
+    payloads = {key: bytes.fromhex(value) for key, value in summary.get('w_payloads', {}).items()}
+    if (payloads != expected_w or
+            any(summary.get('w_checksums', {}).get(key) != _sio_checksum(value)
+                for key, value in expected_w.items())):
+        raise RuntimeError(f'public terminal-R relay W payload/checksum mismatch: {summary}')
+    frames = [bytes.fromhex(value) for value in summary.get('command_frames', ())]
+    if (len(frames) < 5 or any(len(frame) != 5 or frame[0] != 0x7f or
+                               _sio_checksum(frame[:4]) != frame[4] for frame in frames)):
+        raise RuntimeError(f'public terminal-R relay captured malformed command frames: {summary}')
+    if ([frame[1] for frame in frames[:3]] != [ord('W'), ord('P'), ord('R')] or
+            (frames[0][2] | (frames[0][3] << 8)) != len(expected_w['initial'])):
+        raise RuntimeError(f'public terminal-R relay lacks initial File W/P/R: {summary}')
+    ready = bytes.fromhex(summary.get('ready_payload') or '')
+    expected_response = _file_write_response(PUBLIC_API_FILE_MARKER)
+    if (ready != bytes((2, len(expected_response), 0)) or
+            summary.get('ready_checksum') != _sio_checksum(ready) or
+            (frames[2][2] | (frames[2][3] << 8)) != len(expected_response)):
+        raise RuntimeError(f'public terminal-R did not use the exact READY length: {summary}')
+    response = bytes.fromhex(summary.get('terminal_r_response') or '')
+    if (summary.get('terminal_r_controls') != ['A', 'C'] or response != expected_response or
+            summary.get('terminal_r_checksum') != _sio_checksum(response) or
+            summary.get('terminal_r_delivered_checksum') != (_sio_checksum(response) ^ 1)):
+        raise RuntimeError(f'public terminal-R delivery was not accepted then checksum-corrupted: {summary}')
+    cursor = 3
+    retries = []
+    while cursor < len(frames) and frames[cursor][1] == ord('R'):
+        retries.append(frames[cursor])
+        cursor += 1
+    if (not retries or len(summary.get('terminal_r_retry_naks', ())) != len(retries) or
+            any((frame[2] | (frame[3] << 8)) != len(expected_response) for frame in retries) or
+            any(not NetSioPublicTerminalRChecksumRelay._is_nak(bytes.fromhex(value))
+                for value in summary.get('terminal_r_retry_naks', ()))):
+        raise RuntimeError(f'consumed terminal-R retries were not observed and NAKed one-for-one: {summary}')
+    if (cursor + 1 >= len(frames) or frames[cursor][1] != ord('P') or
+            frames[cursor + 1][1] != ord('W') or
+            (frames[cursor][2] | (frames[cursor][3] << 8)) != 0 or
+            (frames[cursor + 1][2] | (frames[cursor + 1][3] << 8)) != len(expected_w['distinct'])):
+        raise RuntimeError(f'public recovery did not observe P(IDLE) before distinct W: {summary}')
+    if (bytes.fromhex(summary.get('idle_payload') or '') != b'\0\0\0' or
+            summary.get('idle_checksum') != 0 or summary.get('idle_controls') != ['A', 'C'] or
+            not summary.get('idle_p_seen') or not summary.get('distinct_w_seen')):
+        raise RuntimeError(f'public recovery P did not prove the consumed slot was IDLE: {summary}')
+
+
 def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False,
-                                malformed_r_recovery=False):
+                                malformed_r_recovery=False, interrupted_r_recovery=False):
     """Run public Clock, File, Network, and Disk calls through NetSIO."""
-    if rejected_w_recovery and malformed_r_recovery:
+    if sum((rejected_w_recovery, malformed_r_recovery, interrupted_r_recovery)) > 1:
         raise ValueError('public acceptance recovery faults are mutually exclusive')
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
@@ -1562,7 +1858,8 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
     relay = None
     altirra_log = None
     try:
-        relay = (NetSioReadyLengthRelay(run) if malformed_r_recovery else
+        relay = (NetSioPublicTerminalRChecksumRelay(run) if interrupted_r_recovery else
+                 NetSioReadyLengthRelay(run) if malformed_r_recovery else
                  NetSioRejectedFileWRelay(run) if rejected_w_recovery else None)
         if relay:
             relay.start()
@@ -1578,7 +1875,7 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
         wait_log(run / 'nio.log', 'Atari public-API Clock/File/Network/Disk acceptance initialized', timeout=15)
         if relay and not relay.endpoint_registered.wait(15):
-            raise RuntimeError('rejected File W relay did not register the live production endpoint')
+            raise RuntimeError('public File recovery relay did not register the live production endpoint')
         before = set(Path('/tmp').glob('altirra-bridge-*.token'))
         cmd, env, temps = altirra_command(False, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
         cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
@@ -1593,21 +1890,21 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         with AltirraBridge.from_token_file(token) as bridge:
             bridge.resume()
         state = inspect_public_api_clock(token, run, timeout, rejected_w_recovery,
-                                         malformed_r_recovery)
+                                         malformed_r_recovery, interrupted_r_recovery)
         altirra_log.flush()
         nio.flush()
         trace = (run / 'nio.log').read_text(errors='replace')
-        state['native_commands'] = (_clock_native_commands(trace) if not (rejected_w_recovery or malformed_r_recovery) else
+        state['native_commands'] = (_clock_native_commands(trace) if not (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery) else
                                     re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace))
         if trace.count('ClockDevice routed request') != 1:
             raise RuntimeError('public API Clock did not produce exactly one real ClockDevice dispatch')
-        expected_file_dispatches = 3 if malformed_r_recovery else 2
+        expected_file_dispatches = 3 if (malformed_r_recovery or interrupted_r_recovery) else 2
         if trace.count('FileDevice routed request') != expected_file_dispatches:
             raise RuntimeError('public API File did not produce the expected real FileDevice dispatch count')
         expected_file_commands = ('FileDevice routed request 1 command=4',
-                                  'FileDevice routed request 2 command=4' if malformed_r_recovery
+                                  'FileDevice routed request 2 command=4' if (malformed_r_recovery or interrupted_r_recovery)
                                   else 'FileDevice routed request 2 command=3',
-                                  'FileDevice routed request 3 command=3' if malformed_r_recovery else None)
+                                  'FileDevice routed request 3 command=3' if (malformed_r_recovery or interrupted_r_recovery) else None)
         if not all(item in trace for item in expected_file_commands if item):
             raise RuntimeError('public API File dispatch order was not the required Write/Read recovery sequence')
         if trace.count('NetworkDevice routed request') != 4:
@@ -1634,19 +1931,19 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         )
         if not all(expected in trace for expected in expected_disk_dispatches):
             raise RuntimeError('public API Disk dispatch order was not Info/Write/Flush/Read')
-        backing_name = (PUBLIC_API_FILE_RECOVERY_NAME if (rejected_w_recovery or malformed_r_recovery) else
+        backing_name = (PUBLIC_API_FILE_RECOVERY_NAME if (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery) else
                         PUBLIC_API_FILE_NAME)
-        backing_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if (rejected_w_recovery or malformed_r_recovery) else
+        backing_marker = (PUBLIC_API_FILE_RECOVERY_MARKER if (rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery) else
                           PUBLIC_API_FILE_MARKER)
         backing_file = storage_root / backing_name
         if not backing_file.is_file() or backing_file.read_bytes() != backing_marker:
             raise RuntimeError('public API File backing store does not retain the intended guest marker')
         if rejected_w_recovery and (storage_root / PUBLIC_API_FILE_NAME).exists():
             raise RuntimeError('rejected File W unexpectedly created its original backing file')
-        if malformed_r_recovery:
+        if malformed_r_recovery or interrupted_r_recovery:
             original = storage_root / PUBLIC_API_FILE_NAME
             if not original.is_file() or original.read_bytes() != PUBLIC_API_FILE_MARKER:
-                raise RuntimeError('malformed-R first File W did not persist exactly once before terminal-R failure')
+                raise RuntimeError('first File W did not persist exactly once before terminal-R failure')
             state['retained_response_backing_file'] = str(original)
             state['retained_response_backing_bytes'] = PUBLIC_API_FILE_MARKER.hex(' ')
         state['backing_file'] = str(backing_file)
@@ -1678,7 +1975,11 @@ def run_netsio_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False
         if relay:
             relay_summary, relay_path = relay.stop()
             relay = None
-            if malformed_r_recovery:
+            if interrupted_r_recovery:
+                _validate_public_terminal_r_relay(relay_summary)
+                state['interrupted_r_fault'] = relay_summary
+                state['interrupted_r_fault_evidence'] = str(relay_path)
+            elif malformed_r_recovery:
                 _validate_ready_length_relay(relay_summary)
                 state['malformed_r_fault'] = relay_summary
                 state['malformed_r_fault_evidence'] = str(relay_path)
@@ -2572,12 +2873,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-malformed-r-recovery-' if a.public_api_malformed_r_recovery else
+        evidence_kind = ('atari-sio-public-api-interrupted-r-recovery-' if a.public_api_interrupted_r_recovery else
+                         'atari-sio-public-api-malformed-r-recovery-' if a.public_api_malformed_r_recovery else
                          'atari-sio-public-api-rejected-w-recovery-' if a.public_api_rejected_w_recovery else
                          'atari-sio-public-api-clock-' if a.public_api_clock else
                          'atari-sio-native-capacity-bounds-altirra-embedded-' if a.native_capacity_bounds_altirra_embedded else
@@ -2599,7 +2901,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -2607,11 +2909,12 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_clock or a.public_api_rejected_w_recovery or a.public_api_malformed_r_recovery:
+    if a.public_api_clock or a.public_api_rejected_w_recovery or a.public_api_malformed_r_recovery or a.public_api_interrupted_r_recovery:
         try:
             result = run_netsio_public_api_clock(a.timeout, evidence_dir,
                                                  rejected_w_recovery=a.public_api_rejected_w_recovery,
-                                                 malformed_r_recovery=a.public_api_malformed_r_recovery)
+                                                 malformed_r_recovery=a.public_api_malformed_r_recovery,
+                                                 interrupted_r_recovery=a.public_api_interrupted_r_recovery)
             result['outcome'] = 'launch'
         except Exception as exc:
             result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}

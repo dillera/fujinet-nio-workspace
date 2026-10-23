@@ -588,13 +588,13 @@ receives a real endpoint NAK.  Its public call returns `FN_ERR_TRANSPORT`
 first performs P(READY, 17) and R(17) to drain the retained original reply,
 then sends the new W.  It does not replay the accepted side-effecting request.
 
-The live run uncovered and corrected a concrete common-library defect:
-`fn_raw_call()` used to replay all non-timeout exchange errors, including an
-Atari terminal-R transport failure.  It now retries only `FN_ERR_IO` short or
-corrupt FujiBus bodies.  The new host `raw_transport_retry_test` proves both
-that transport errors issue exactly one exchange and that the intentional
-short-body retry remains one retry.  This shared correction preserves the
-Atari recovery contract and is built for every supported library target.
+The live run uncovered the original concrete common-library replay defect:
+`fn_raw_call()` replayed non-timeout exchange errors, including an Atari
+terminal-R transport failure.  The first correction stopped replay after
+`FN_ERR_TRANSPORT`; the later generic hardening below removed the remaining
+`FN_ERR_IO` replay as well.  The shared raw transport regression now proves
+that every uncertain response outcome performs exactly one exchange on every
+supported library target.
 
 The version-6 result block records the initial failure status and recovery
 kind alongside the established service results.  The relay evidence records
@@ -628,9 +628,8 @@ Verification performed: rebuilt the library/Atari archive and configuration
 ATR; ran all 45 Atari fixture/runner tests; ran all three live public-API
 paths; ran the D1 boot gate; and ran complete `repos/fujinet-nio-lib make
 check`, including all 123 assembled soft65c02 transport assertions and the
-new raw retry guard.  Accepted-but-interrupted R, reset, conditional PROC, and
-embedded-Altirra public-service acceptance remain open.  Story 2.4 is not
-complete.
+new raw retry guard.  Reset, conditional PROC, and embedded-Altirra
+public-service acceptance remain open.  Story 2.4 is not complete.
 
 ## Generic raw-call replay hardening
 
@@ -666,8 +665,47 @@ Fresh live evidence retains all public acceptance behavior:
 The configuration ATR pin above reflects this library change.  The fixture
 validator, focused public runner tests, fresh live public paths, fresh D1 boot
 gate, and complete all-target `repos/fujinet-nio-lib make check` pass.
-Interrupted-R, reset, PROC, and embedded public-service acceptance remain
-deliberately out of scope.
+Reset, PROC, and embedded public-service acceptance remain deliberately out
+of scope.
+
+## Accepted terminal-R delivery interruption
+
+The public NetSIO runner now uses a one-shot transparent carrier relay for
+the original File Write.  It forwards the selected W, its exact payload and
+checksum, P(READY `$0011`), and the correct R to the production endpoint.  It
+waits for that endpoint's ACK/COMPLETE and complete literal File Write FujiBus
+response (`fe 04 11 00 23 01 00 01 00 00 00 00 00 00 00 0d 00`) before changing
+only the following SIO checksum from `$46` to `$47` on the downstream delivery.
+It is not a Q/W/P/R peer and cannot manufacture a response.
+
+The guest records File status `$10` rather than false success.  The first
+write dispatches once and durably writes `ATARI-FILE-24`.  The observed Atari
+OS retry count is retained as evidence (not prescribed): each repeated R with
+the correct `$0011` AUX receives an endpoint NAK because the accepted R has
+already consumed the slot.  On the distinct public File Write, the production
+Atari transport first emits P and receives exact IDLE `00 00 00` with checksum
+`$00`; it sends no recovery R and no replay of the original W.  The new write
+then dispatches once, writes `ATARI-FILE-RECOVERY-24`, and completes normally.
+
+`NetSioPublicTerminalRChecksumRelay` retains the full command frames, both
+File W raw packets/checksums, READY and IDLE replies, accepted terminal-R
+controls/body/checksum, every physical retry/NAK pair, and backing-store
+paths.  Its validator rejects stale READY, a duplicate original write, missing
+checksum corruption, incorrect terminal-R AUX/body/checksum, a falsely
+successful public result, or a W that precedes P(IDLE).  The focused unittest
+performs each negative mutation without replacing the live endpoint.
+
+Live evidence:
+
+- `test-evidence/atari-sio-public-api-interrupted-r-recovery-20261023-222704/`
+  records `ADP!`, one original and one distinct File Write dispatch, 14
+  observed accepted-R retry/NAK pairs, P(IDLE) before the distinct W, the
+  literal delivery corruption, and both independently inspected backing files.
+- `test-evidence/atari-sio-boot-20261023-222432/` freshly preserves the D1
+  page-6 `NIO!` native and production-NetSIO gate after this increment.
+
+Story 2.4 remains open: reset, PROC, and embedded public-service acceptance
+are still separate increments.
 
 ## Acceptance criteria
 

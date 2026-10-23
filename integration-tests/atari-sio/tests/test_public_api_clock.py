@@ -128,6 +128,80 @@ class PublicApiClockTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._validate_ready_length_relay(summary)
 
+    def test_interrupted_terminal_r_relay_requires_consumption_idle_and_distinct_w(self):
+        def frame(command, aux=0):
+            value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))
+            return value + bytes((boot_runner._sio_checksum(value),))
+
+        initial = boot_runner._file_write_packet(boot_runner.PUBLIC_API_FILE_URI,
+                                                  boot_runner.PUBLIC_API_FILE_MARKER)
+        distinct = boot_runner._file_write_packet(
+            boot_runner.PUBLIC_API_FILE_RECOVERY_URI,
+            boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER)
+        response = boot_runner._file_write_response(boot_runner.PUBLIC_API_FILE_MARKER)
+        summary = {
+            'failure': None,
+            'fault_applied': True,
+            'command_frames': [frame('W', len(initial)).hex(' '), frame('P').hex(' '),
+                               frame('R', len(response)).hex(' '),
+                               frame('R', len(response)).hex(' '), frame('P').hex(' '),
+                               frame('W', len(distinct)).hex(' '), frame('P').hex(' '),
+                               frame('R', len(response)).hex(' ')],
+            'w_payloads': {'initial': initial.hex(' '), 'distinct': distinct.hex(' ')},
+            'w_checksums': {'initial': boot_runner._sio_checksum(initial),
+                            'distinct': boot_runner._sio_checksum(distinct)},
+            'ready_payload': bytes((2, len(response), 0)).hex(' '),
+            'ready_checksum': boot_runner._sio_checksum(bytes((2, len(response), 0))),
+            'terminal_r_controls': ['A', 'C'],
+            'terminal_r_response': response.hex(' '),
+            'terminal_r_checksum': boot_runner._sio_checksum(response),
+            'terminal_r_delivered_checksum': boot_runner._sio_checksum(response) ^ 1,
+            'terminal_r_retry_naks': ['01 4e'],
+            'idle_payload': '00 00 00',
+            'idle_checksum': 0,
+            'idle_controls': ['A', 'C'],
+            'idle_p_seen': True,
+            'distinct_w_seen': True,
+        }
+        boot_runner._validate_public_terminal_r_relay(summary)
+        # Stale READY proves the consumed response was not actually retired.
+        summary['idle_payload'] = bytes((2, len(response), 0)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_terminal_r_relay(summary)
+        summary['idle_payload'] = '00 00 00'
+        # A replayed original W is not a distinct application operation.
+        summary['w_payloads']['distinct'] = initial.hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_terminal_r_relay(summary)
+        summary['w_payloads']['distinct'] = distinct.hex(' ')
+        # Missing delivery corruption must never count as interruption proof.
+        summary['fault_applied'] = False
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_terminal_r_relay(summary)
+        summary['fault_applied'] = True
+        # A new W before the recovery P would replay/overtake the uncertain call.
+        summary['command_frames'][4] = frame('W', len(distinct)).hex(' ')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_terminal_r_relay(summary)
+
+    def test_failed_terminal_r_cannot_be_reported_as_successful_public_call(self):
+        state = {
+            'file_write_status': '10',
+            'file_rejected_w_status': '10',
+            'file_failure_status': '10',
+            'file_recovery_attempted': '01',
+            'file_recovery_kind': '01',
+            'file_recovery_write_status': '00',
+            'file_recovery_write_device_status': '00',
+            'file_recovery_write_response_length': 10,
+            'file_recovery_write_count': len(boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER),
+            'file_recovery_verify': '01',
+        }
+        boot_runner._validate_public_file_recovery_state(state)
+        state['file_write_status'] = '00'
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_file_recovery_state(state)
+
     def test_expected_cc65_clock_is_full_little_endian_eight_bytes(self):
         self.assertEqual(boot_runner.PUBLIC_API_CLOCK_BYTES,
                          bytes.fromhex("08 07 06 05 04 03 02 01"))
