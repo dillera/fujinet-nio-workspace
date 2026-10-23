@@ -10,6 +10,12 @@ import fnaccept_memory_layout as layout
 
 
 class FnacceptMemoryLayoutTests(unittest.TestCase):
+    def test_fnaccept_common_object_exception_is_atari_only(self):
+        build = (WORKSPACE / 'repos/nio-core-apps/makefiles/build.mk').read_text()
+        self.assertIn('FNACCEPT_COMMON_OBJS := $(COMMON_OBJS)', build)
+        scoped = build.index('ifeq ($(TARGET),atari)', build.index('FNACCEPT_COMMON_OBJS'))
+        self.assertLess(scoped, build.index('FNACCEPT_COMMON_OBJS :=', scoped + 1))
+
     def test_linked_image_fits_approved_display_and_stack_bounds(self):
         map_path = WORKSPACE / 'repos/nio-core-apps/build/atari/bin/fnaccept.map'
         report = layout.validate_link_layout(
