@@ -218,6 +218,52 @@ Verification performed:
   'test_*.py'` (37 tests), live `--public-api-clock`, and the existing
   explicit-cold-reset D1 page-6 boot regression.
 
+## Implemented increment: NetSIO public File persistence acceptance
+
+The same `fnaccept.xex` now retains the Clock proof and adds a bounded,
+test-local FileDevice application-payload helper. It uses the existing public
+`fn_raw_call()` only for FileDevice `WriteFile` (`0x04`) and `ReadFile`
+(`0x03`); it constructs neither FujiBus headers nor SIO/DCB/Q/W/P/R frames.
+The short `persist:///fnaccept-v1.bin` URI and `ATARI-FILE-24` marker produce
+48-byte Write and 35-byte Read application requests, well below the 512-byte
+native packet bound.
+
+Result-block version 2 preserves the original init/Clock status, complete
+eight-byte Clock value, and heartbeat, then adds File transport/device status,
+response length, transferred length, and exact readback verification. A pass
+is `AFP!` at stage 5. The NetSIO acceptance runner creates a per-run POSIX
+`host` filesystem using the production filesystem factory, registers it with
+the real core `StorageManager`, and registers the production `FileDevice`.
+It independently reads `fnaccept-v1.bin` after guest completion and rejects
+anything other than the exact 13-byte marker.
+
+Live evidence:
+`test-evidence/atari-sio-public-api-clock-20261023-182619/` records Clock
+`00`, File Write and Read transport/device status `00`, Write response length
+10, Read response length 23, both transferred lengths 13, advancing guest
+heartbeat, the persisted backing-file bytes, exactly one Clock dispatch, and
+exactly two FileDevice dispatches in `WriteFile` then `ReadFile` order. The
+captured native sequence is three ordered W/P/R exchanges (Clock, Write,
+Read), all through the production NetSIO ingress/frontend/core route.
+
+The revised link map places loaded code/data at `$2400`–`$6987` and BSS at
+`$6988`–`$7711`; the stable `$0a00` result block remains outside library and
+application static storage. The rebuilt configuration ATR changes only its
+whole-image identity (`disk_v1.json` now pins
+`53063f1b6118424fb6e0ca7a0e9920ada6bfd924b908c1a07c46349fce083eda`);
+the independently pinned first four D1 sectors remain byte-identical.
+
+Additional verification performed:
+
+- Atari library archive build (`make atari`); no library source/API changed.
+- Rebuilt configuration ATR and the 38-test Atari fixture/runner suite.
+- Focused public Clock/File runner tests, full firmware POSIX CTest, live
+  `--public-api-clock`, and the explicit-cold-reset D1 page-6 boot regression
+  (`NIO!` for native and NetSIO; projection `pass`).
+
+Network, Disk, recovery, PROC, and embedded-adapter acceptance remain outside
+this focused increment and are still open.
+
 ## Acceptance criteria
 
 1. A configuration-ATR cc65 XEX built from the normal pipeline proves Clock,
