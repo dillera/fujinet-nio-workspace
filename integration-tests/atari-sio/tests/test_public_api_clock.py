@@ -24,9 +24,12 @@ class PublicApiClockTests(unittest.TestCase):
         for call in ("fn_open(&network_handle", "fn_write(network_handle", "fn_read(network_handle", "fn_close(network_handle"):
             self.assertIn(call, source)
         self.assertIn("fixture://nio-accept", source)
+        for call in ("fn_disk_info(FNACCEPT_DISK_SLOT", "fn_disk_write_sector(FNACCEPT_DISK_SLOT",
+                     "fn_disk_flush(FNACCEPT_DISK_SLOT", "fn_disk_read_sector(FNACCEPT_DISK_SLOT"):
+            self.assertIn(call, source)
 
     def test_native_trace_requires_exact_clock_file_network_w_p_r_exchanges(self):
-        commands = ("57", "50", "52") * 7
+        commands = ("57", "50", "52") * 11
         trace = "\n".join(
             f"udp: Received 7 bytes: 02 7F {command} 00 00 CF {index:02X}"
             for index, command in enumerate(commands, start=1)
@@ -57,6 +60,18 @@ class PublicApiClockTests(unittest.TestCase):
                 boot_runner.PUBLIC_API_NETWORK_WRITE_PAYLOAD_BYTES,
                 boot_runner.PUBLIC_API_NETWORK_READ_PAYLOAD_BYTES,
                 boot_runner.PUBLIC_API_NETWORK_CLOSE_PAYLOAD_BYTES):
+            self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES + payload_length, 512)
+
+    def test_disk_fixture_is_a_complete_bounded_128_byte_sector_pattern(self):
+        self.assertEqual(len(boot_runner.PUBLIC_API_DISK_PATTERN), 128)
+        self.assertNotEqual(boot_runner.PUBLIC_API_DISK_PATTERN[:64],
+                            boot_runner.PUBLIC_API_DISK_PATTERN[64:])
+        self.assertEqual(boot_runner.PUBLIC_API_DISK_PATTERN[0], 0xa5)
+        for payload_length in (
+                boot_runner.PUBLIC_API_DISK_INFO_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_DISK_WRITE_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_DISK_FLUSH_PAYLOAD_BYTES,
+                boot_runner.PUBLIC_API_DISK_READ_PAYLOAD_BYTES):
             self.assertLessEqual(boot_runner.PUBLIC_API_FUJIBUS_HEADER_BYTES + payload_length, 512)
 
 

@@ -51,7 +51,7 @@ PROJECTION_CAPACITY_REQUEST_GUARD_HIGH = 0x2200
 PROJECTION_CAPACITY_RESPONSE_GUARD_LOW = 0x23ff
 PROJECTION_CAPACITY_RESPONSE = 0x2400
 PROJECTION_CAPACITY_RESPONSE_GUARD_HIGH = 0x2600
-PUBLIC_API_RESULT = 0x0A00
+PUBLIC_API_RESULT = 0x0B00
 PUBLIC_API_CLOCK_TIME = PUBLIC_API_RESULT + 8
 PUBLIC_API_HEARTBEAT = PUBLIC_API_RESULT + 16
 PUBLIC_API_CLOCK_BYTES = bytes.fromhex('08 07 06 05 04 03 02 01')
@@ -74,6 +74,19 @@ PUBLIC_API_NETWORK_READ_FLAGS = PUBLIC_API_RESULT + 40
 PUBLIC_API_NETWORK_VERIFY = PUBLIC_API_RESULT + 41
 PUBLIC_API_NETWORK_CLOSE_STATUS = PUBLIC_API_RESULT + 42
 PUBLIC_API_NETWORK_REPLY = PUBLIC_API_RESULT + 43
+PUBLIC_API_DISK_INFO_STATUS = PUBLIC_API_RESULT + 55
+PUBLIC_API_DISK_FLAGS = PUBLIC_API_RESULT + 56
+PUBLIC_API_DISK_SLOT = PUBLIC_API_RESULT + 57
+PUBLIC_API_DISK_TYPE = PUBLIC_API_RESULT + 58
+PUBLIC_API_DISK_SECTOR_SIZE = PUBLIC_API_RESULT + 59
+PUBLIC_API_DISK_SECTOR_COUNT = PUBLIC_API_RESULT + 61
+PUBLIC_API_DISK_LAST_ERROR = PUBLIC_API_RESULT + 65
+PUBLIC_API_DISK_WRITE_STATUS = PUBLIC_API_RESULT + 66
+PUBLIC_API_DISK_FLUSH_STATUS = PUBLIC_API_RESULT + 67
+PUBLIC_API_DISK_READ_STATUS = PUBLIC_API_RESULT + 68
+PUBLIC_API_DISK_WRITE_LENGTH = PUBLIC_API_RESULT + 69
+PUBLIC_API_DISK_READ_LENGTH = PUBLIC_API_RESULT + 71
+PUBLIC_API_DISK_VERIFY = PUBLIC_API_RESULT + 73
 PUBLIC_API_FILE_URI = b'persist:///fnaccept-v1.bin'
 PUBLIC_API_FILE_MARKER = b'ATARI-FILE-24'
 PUBLIC_API_FILE_NAME = 'fnaccept-v1.bin'
@@ -91,6 +104,22 @@ PUBLIC_API_NETWORK_OPEN_PAYLOAD_BYTES = 1 + 1 + 1 + 2 + len(PUBLIC_API_NETWORK_U
 PUBLIC_API_NETWORK_WRITE_PAYLOAD_BYTES = 1 + 2 + 4 + 2 + len(PUBLIC_API_NETWORK_WRITE_MARKER)
 PUBLIC_API_NETWORK_READ_PAYLOAD_BYTES = 1 + 2 + 4 + 2
 PUBLIC_API_NETWORK_CLOSE_PAYLOAD_BYTES = 1 + 2
+PUBLIC_API_DISK_SLOT_VALUE = 2
+PUBLIC_API_DISK_LBA = 5
+PUBLIC_API_DISK_SECTOR_BYTES = 128
+PUBLIC_API_DISK_SECTOR_COUNT_VALUE = 16
+PUBLIC_API_DISK_IMAGE_NAME = 'fnaccept-disk.atr'
+PUBLIC_API_DISK_ATR_HEADER_BYTES = 16
+PUBLIC_API_DISK_INFO_PAYLOAD_BYTES = 2
+PUBLIC_API_DISK_WRITE_PAYLOAD_BYTES = 1 + 1 + 4 + 2 + PUBLIC_API_DISK_SECTOR_BYTES
+PUBLIC_API_DISK_FLUSH_PAYLOAD_BYTES = 2
+PUBLIC_API_DISK_READ_PAYLOAD_BYTES = 1 + 1 + 4 + 2
+
+def public_api_disk_pattern(index):
+    return ((index * 37) ^ 0xa5) & 0xff
+
+PUBLIC_API_DISK_PATTERN = bytes(public_api_disk_pattern(index)
+                                for index in range(PUBLIC_API_DISK_SECTOR_BYTES))
 # A bridge pause can capture any instruction-boundary phase of the three-byte
 # JMP $0624 loop, including the post-operand PC just before its target applies.
 LOOP_PCS = {LOOP, LOOP + 1, LOOP + 2, LOOP + 3}
@@ -865,7 +894,7 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
     with AltirraBridge.from_token_file(token) as bridge:
         while time.monotonic() < deadline:
             signature = bridge.peek(PUBLIC_API_RESULT, 4)
-            if signature in (b'ANP!', b'ACF!'):
+            if signature in (b'ADP!', b'ACF!'):
                 state = {
                     'guest_result': signature.decode('ascii'),
                     'version': bridge.peek(PUBLIC_API_RESULT + 4, 1).hex(),
@@ -893,6 +922,20 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                     'network_close_status': bridge.peek(PUBLIC_API_NETWORK_CLOSE_STATUS, 1).hex(),
                     'network_reply': bridge.peek(PUBLIC_API_NETWORK_REPLY,
                                                  len(PUBLIC_API_NETWORK_REPLY_BYTES)).hex(' '),
+                    'disk_info_status': bridge.peek(PUBLIC_API_DISK_INFO_STATUS, 1).hex(),
+                    'disk_flags': bridge.peek(PUBLIC_API_DISK_FLAGS, 1).hex(),
+                    'disk_slot': bridge.peek(PUBLIC_API_DISK_SLOT, 1).hex(),
+                    'disk_type': bridge.peek(PUBLIC_API_DISK_TYPE, 1).hex(),
+                    'disk_sector_size': _read_u16(bridge, PUBLIC_API_DISK_SECTOR_SIZE),
+                    'disk_sector_count': int.from_bytes(
+                        bridge.peek(PUBLIC_API_DISK_SECTOR_COUNT, 4), 'little'),
+                    'disk_last_error': bridge.peek(PUBLIC_API_DISK_LAST_ERROR, 1).hex(),
+                    'disk_write_status': bridge.peek(PUBLIC_API_DISK_WRITE_STATUS, 1).hex(),
+                    'disk_flush_status': bridge.peek(PUBLIC_API_DISK_FLUSH_STATUS, 1).hex(),
+                    'disk_read_status': bridge.peek(PUBLIC_API_DISK_READ_STATUS, 1).hex(),
+                    'disk_write_length': _read_u16(bridge, PUBLIC_API_DISK_WRITE_LENGTH),
+                    'disk_read_length': _read_u16(bridge, PUBLIC_API_DISK_READ_LENGTH),
+                    'disk_verify': bridge.peek(PUBLIC_API_DISK_VERIFY, 1).hex(),
                 }
                 heartbeats = []
                 for _ in range(4):
@@ -902,10 +945,10 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                 state['continued_execution'] = len(set(heartbeats)) > 1
                 evidence_dir.joinpath('screen.png').write_bytes(bridge.screenshot())
                 evidence_dir.joinpath('inspection.json').write_text(json.dumps(state, indent=2) + '\n')
-                if signature != b'ANP!':
-                    raise RuntimeError(f"public API Clock/File/Network guest failed at stage {state['stage']}")
-                if state['version'] != '03' or state['stage'] != '09':
-                    raise RuntimeError(f"public API Clock/File/Network guest has invalid result header: {state}")
+                if signature != b'ADP!':
+                    raise RuntimeError(f"public API Clock/File/Network/Disk guest failed at stage {state['stage']}")
+                if state['version'] != '04' or state['stage'] != '0d':
+                    raise RuntimeError(f"public API Clock/File/Network/Disk guest has invalid result header: {state}")
                 if state['init_status'] != '00' or state['clock_status'] != '00':
                     raise RuntimeError(f"public API Clock call did not succeed: {state}")
                 if bytes.fromhex(state['clock_value']) != PUBLIC_API_CLOCK_BYTES:
@@ -930,8 +973,21 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
                     raise RuntimeError(f"public API Network call result mismatch: {state}")
                 if bytes.fromhex(state['network_reply']) != PUBLIC_API_NETWORK_REPLY_BYTES:
                     raise RuntimeError(f"public API Network reply mismatch: {state}")
+                if (state['disk_info_status'], state['disk_slot'],
+                    state['disk_sector_size'], state['disk_sector_count'],
+                    state['disk_last_error'], state['disk_write_status'],
+                    state['disk_flush_status'], state['disk_read_status'],
+                    state['disk_write_length'], state['disk_read_length'],
+                    state['disk_verify']) != (
+                        '00', f'{PUBLIC_API_DISK_SLOT_VALUE:02x}',
+                        PUBLIC_API_DISK_SECTOR_BYTES, PUBLIC_API_DISK_SECTOR_COUNT_VALUE,
+                        '00', '00', '00', '00',
+                        PUBLIC_API_DISK_SECTOR_BYTES, PUBLIC_API_DISK_SECTOR_BYTES, '01'):
+                    raise RuntimeError(f"public API Disk result mismatch: {state}")
+                if (int(state['disk_flags'], 16) & 0x13) != 0x11:
+                    raise RuntimeError(f"public API Disk geometry is not writable/inserted: {state}")
                 if not state['continued_execution']:
-                    raise RuntimeError('public API Clock/File/Network guest did not continue after its result')
+                    raise RuntimeError('public API Clock/File/Network/Disk guest did not continue after its result')
                 return state
             time.sleep(.05)
     raise RuntimeError('public API Clock/File guest did not reach a terminal result')
@@ -939,14 +995,14 @@ def inspect_public_api_clock(token, evidence_dir, timeout):
 
 def _clock_native_commands(trace):
     commands = re.findall(r'udp: Received \d+ bytes: 02 7F ([0-9A-F]{2}) ', trace)
-    expected = ['57', '50', '52'] * 7
+    expected = ['57', '50', '52'] * 11
     if commands != expected:
-        raise RuntimeError(f'public API Clock/File/Network native command order is {commands}, expected {expected}')
+        raise RuntimeError(f'public API Clock/File/Network/Disk native command order is {commands}, expected {expected}')
     return commands
 
 
 def run_netsio_public_api_clock(timeout, evidence_dir):
-    """Run public Clock, File, and Network calls through production NetSIO."""
+    """Run public Clock, File, Network, and Disk calls through NetSIO."""
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
     if not PUBLIC_API_CLOCK_ENDPOINT.is_file():
@@ -965,7 +1021,7 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         ps.append(launch([str(PUBLIC_API_CLOCK_ENDPOINT), '--host', '127.0.0.1', '--port', '9997',
                           '--storage-root', str(storage_root)],
                          cwd=run, stdout=nio, stderr=subprocess.STDOUT))
-        wait_log(run / 'nio.log', 'Atari public-API Clock/File/Network acceptance initialized', timeout=15)
+        wait_log(run / 'nio.log', 'Atari public-API Clock/File/Network/Disk acceptance initialized', timeout=15)
         before = set(Path('/tmp').glob('altirra-bridge-*.token'))
         cmd, env, temps = altirra_command(False, trace_serial=True, program=PUBLIC_API_CLOCK_XEX)
         cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
@@ -1003,11 +1059,35 @@ def run_netsio_public_api_clock(timeout, evidence_dir):
         )
         if not all(expected in trace for expected in expected_network_dispatches):
             raise RuntimeError('public API Network fixture did not observe the exact open/write/read/close route')
+        if trace.count('DiskDevice routed request') != 4:
+            raise RuntimeError('public API Disk did not produce exactly four real DiskDevice dispatches')
+        expected_disk_dispatches = (
+            'Disk fixture mounted slot=2 path=/fnaccept-disk.atr sector_bytes=128 sectors=16',
+            'DiskDevice routed request 1 command=5',
+            'DiskDevice routed request 2 command=4',
+            'DiskDevice routed request 3 command=14',
+            'DiskDevice routed request 4 command=3',
+        )
+        if not all(expected in trace for expected in expected_disk_dispatches):
+            raise RuntimeError('public API Disk dispatch order was not Info/Write/Flush/Read')
         backing_file = storage_root / PUBLIC_API_FILE_NAME
         if not backing_file.is_file() or backing_file.read_bytes() != PUBLIC_API_FILE_MARKER:
             raise RuntimeError('public API File backing store does not retain the guest marker')
         state['backing_file'] = str(backing_file)
         state['backing_file_bytes'] = PUBLIC_API_FILE_MARKER.hex(' ')
+        disk_image = storage_root / PUBLIC_API_DISK_IMAGE_NAME
+        disk_offset = PUBLIC_API_DISK_ATR_HEADER_BYTES + PUBLIC_API_DISK_LBA * PUBLIC_API_DISK_SECTOR_BYTES
+        disk_bytes = disk_image.read_bytes() if disk_image.is_file() else b''
+        if (len(disk_bytes) < disk_offset + PUBLIC_API_DISK_SECTOR_BYTES or
+                disk_bytes[disk_offset:disk_offset + PUBLIC_API_DISK_SECTOR_BYTES] != PUBLIC_API_DISK_PATTERN):
+            raise RuntimeError('public API Disk backing ATR does not retain the guest sector pattern')
+        for neighbor_lba in (PUBLIC_API_DISK_LBA - 1, PUBLIC_API_DISK_LBA + 1):
+            neighbor_offset = PUBLIC_API_DISK_ATR_HEADER_BYTES + neighbor_lba * PUBLIC_API_DISK_SECTOR_BYTES
+            if disk_bytes[neighbor_offset:neighbor_offset + PUBLIC_API_DISK_SECTOR_BYTES] != b'\0' * PUBLIC_API_DISK_SECTOR_BYTES:
+                raise RuntimeError('public API Disk backing ATR changed a neighboring sector')
+        state['disk_backing_image'] = str(disk_image)
+        state['disk_backing_lba'] = PUBLIC_API_DISK_LBA
+        state['disk_backing_pattern'] = PUBLIC_API_DISK_PATTERN.hex(' ')
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
             lines = [line for line in (run / 'altirra.log').read_text(errors='replace').splitlines()

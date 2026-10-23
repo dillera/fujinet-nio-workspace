@@ -310,10 +310,9 @@ page-6 gate also remains green at
 
 Additional verification performed:
 
-- Rebuilt the Atari archive, the XEX, and the configuration ATR; updated the
-  whole-image pin in `disk_v1.json` to
-  `e7ad3b13134c14cd13e0bef7a9d8b02133ecbf4432ea765e7c894c8c8076c71d` while
-  retaining the independent D1 sector literals.
+- Rebuilt the Atari archive, the XEX, and the configuration ATR; the later
+  Disk increment repins the whole-image identity while retaining the
+  independent D1 sector literals.
 - Focused public acceptance checks plus the full 39-test Atari fixture/runner
   suite; the focused guard requires exactly seven ordered native W/P/R
   operations and rejects a reordered P.
@@ -323,6 +322,76 @@ Additional verification performed:
 
 Disk, recovery, PROC, and embedded-adapter acceptance remain outside this
 focused increment; Story 2.4 remains in progress.
+
+## Implemented increment: NetSIO public DiskDevice sector acceptance
+
+`fnaccept.xex` now preserves the Clock, durable File, and Network stages and
+adds the public DiskDevice row using only `fn_disk_info()`,
+`fn_disk_write_sector()`, `fn_disk_flush()`, and `fn_disk_read_sector()`.
+The guest queries slot 2, requires a writable inserted 128-byte-sector image
+with 16 sectors, writes a deterministic nonconstant 128-byte pattern to LBA
+5, flushes it, reads it back, and checks every returned byte and both transfer
+lengths.  The complete Disk application payloads are 2 bytes (Info), 136
+bytes (Write), 2 bytes (Flush), and 8 bytes (Read); including the FujiBus
+header, each remains within the 512-byte transport limit.  The guest neither
+constructs FujiBus/SIO frames nor owns SIOV/DCB/Q/W/P/R.
+
+The real-core NetSIO composition creates and mounts `/fnaccept-disk.atr`
+through the production `DiskService` and `StorageManager` in DiskDevice's
+zero-based slot 1 (guest-visible slot 2).  It is a fresh writable 16-sector,
+128-byte ATR in the per-run storage root; D1 remains the configuration/boot
+ATR and is never written.  The runner requires exactly four production
+DiskDevice dispatches in Info (`5`), Write (`4`), Flush (`14`), Read (`3`)
+order.  After guest completion it reads the backing ATR directly, verifies the
+full LBA-5 pattern at the ATR-header-adjusted offset, and verifies both
+adjacent sectors remain zero.
+
+The result record is version 4 at `$0b00`, with success signature `ADP!` at
+stage 13.  It retains the prior service results and heartbeat, then records
+Disk Info status, flags, slot/type, 16-bit sector size, 32-bit sector count,
+last service error, Write/Flush/Read statuses, both 16-bit transfer lengths,
+and byte-for-byte verification.  The Disk linked archive needed more static
+space than the previous XEX layout: `fnaccept` alone now starts at `$2000`
+(all other Atari apps retain their normal start address), its result record is
+at `$0b00`, and its static sector buffers occupy `$0b80` and `$0c00`.
+The reviewed final map is STARTUP `$2000`--`$2062`, CODE `$206f`--`$9075`,
+RODATA `$9076`--`$919a`, DATA `$919b`--`$91d7`, and BSS `$91d8`--`$9f8d`;
+the transport context is at `$9d48`.  This keeps all observable and sector
+buffers outside library/application static storage.  The cc65 Disk API also
+reuses the library's synchronous packet buffers rather than allocating a
+second 1 KiB request/reply pair; all other target backends retain their
+existing storage and behavior.
+
+Live evidence:
+`test-evidence/atari-sio-public-api-clock-20261023-193125/` records `ADP!`,
+version `04`, stage `0d`, complete successful Clock/File/Network results, Disk
+slot `02`, sector size `128`, count `16`, all Disk statuses `00`, both lengths
+`128`, verification `01`, advancing heartbeats, and eleven ordered native
+W/P/R exchanges.  Its production firmware log contains the exact four
+DiskDevice dispatches, and the retained per-run ATR has the full expected
+LBA-5 pattern with LBA 4 and 6 unchanged.  The regenerated configuration ATR
+is pinned in `disk_v1.json` as
+`0d824da3bf8addf568af3224de73c89adb0e71eb679f7778c01264a22e751eb6`, while
+the independently literal first four D1 sectors remain unchanged.
+
+Verification performed:
+
+- Complete `make -C repos/fujinet-nio-lib check`, including all configured
+  library targets, public archive-link coverage, host wire tests, and the
+  123-case assembled Atari transport suite.
+- Rebuilt `fnaccept` and the existing configuration ATR with
+  `make -C repos/nio-core-apps -f makefiles/build.mk TARGET=atari fnaccept
+  boot-disk`.
+- Full 40-test Atari fixture/runner suite, focused public acceptance runner,
+  and the live `--public-api-clock` Clock+File+Network+Disk NetSIO run.
+- POSIX firmware build plus full CTest (3/3); the existing explicit-cold-reset
+  D1 page-6 boot regression is retained as a separate gate and passed at
+  `test-evidence/atari-sio-boot-20261023-193150/` (`NIO!` for native and
+  NetSIO, projection `pass`).
+
+Recovery fault injection, conditional PROC evidence, and embedded-Altirra
+public-service acceptance are deliberately still open; this increment does
+not mark Story 2.4 complete.
 
 ## Acceptance criteria
 
