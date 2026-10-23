@@ -378,6 +378,77 @@ class VirtualProjectionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             boot_runner._assert_embedded_reset_to_idle_guest_state(run)
 
+    def test_altirra_embedded_interrupted_r_requires_consumed_naks_and_guest_failure(self):
+        def pokey(direction, value):
+            if direction == "Receive":
+                return f"[SIODATA] [  0] Receive      < ${value:02X}"
+            return f"[SIODATA] [  0] {direction:<8} ${value:02X} >"
+
+        frames = (
+            bytes.fromhex("7f 51 00 00 d0"), bytes.fromhex("7f 57 06 00 dc"),
+            bytes.fromhex("7f 50 00 00 cf"), bytes.fromhex("7f 52 09 00 da"),
+            bytes.fromhex("7f 52 09 00 da"), bytes.fromhex("7f 52 09 00 da"),
+            bytes.fromhex("7f 50 00 00 cf"), bytes.fromhex("7f 57 06 00 dc"),
+            bytes.fromhex("7f 50 00 00 cf"), bytes.fromhex("7f 52 09 00 da"),
+            bytes.fromhex("7f 50 00 00 cf"),
+        )
+        replies = (
+            b"AC\x01\x00\x02\x00\x03", b"AAC", b"AC\x02\x09\x00\x0b",
+            bytes.fromhex("41 43 01 02 09 00 0d 01 00 aa 55 1b"), b"N", b"N",
+            b"AC\x00\x00\x00\x00", b"AAC", b"AC\x02\x09\x00\x0b",
+            bytes.fromhex("41 43 01 04 09 00 0f 01 00 5a a5 1e"),
+            b"AC\x00\x00\x00\x00",
+        )
+        data = {
+            1: bytes.fromhex("01 02 06 00 09 00 12"),
+            7: bytes.fromhex("01 04 06 00 0b 00 16"),
+        }
+        lines = []
+        for index, (frame, reply) in enumerate(zip(frames, replies)):
+            lines.extend(pokey("SendCmd", value) for value in frame)
+            lines.extend(pokey("Send", value) for value in data.get(index, b""))
+            lines.extend(pokey("Receive", value) for value in reply)
+        trace = "\n".join(lines) + "\n"
+        core_log = "\n".join((
+            "[fujinetnio-projection] core dispatch fixture route invocation 1",
+            "[fujinetnio] projection fault: accepted terminal R checksum 1a delivered as 1b",
+            "[fujinetnio-projection] core dispatch fixture route invocation 2",
+        )) + "\n"
+        observed = projection.compare_altirra_embedded_native_interrupted_r_recovery(
+            trace, core_log, self.manifest)
+        self.assertEqual([entry["fixture"] for entry in observed], [
+            "q-idle", "w-core-dispatch", "p-core-dispatch-ready",
+            "r-core-dispatch-interrupted-consumes", "p-idle-after-consumed-r",
+            "w-core-dispatch-after-interrupted-r", "p-core-dispatch-ready",
+            "r-core-dispatch-after-interrupted-r", "p-idle-after-consumed-r",
+        ])
+        self.assertEqual(observed[3]["response"], {
+            "controls": ["A", "C"], "payload": "01 02 09 00 0d 01 00 aa 55", "checksum": "1b",
+        })
+        self.assertEqual(observed[3]["expected_checksum"], "1a")
+        self.assertEqual(observed[3]["siov_attempts"], 3)
+        self.assertEqual(observed[3]["consumed_retry_controls"], [["N"], ["N"]])
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_interrupted_r_recovery(
+                trace.replace("Receive      < $1B", "Receive      < $1C", 1),
+                core_log, self.manifest)
+        with self.assertRaises(projection.ProjectionMismatch):
+            projection.compare_altirra_embedded_native_interrupted_r_recovery(
+                boot_runner._embedded_replace_response(
+                    trace, bytes.fromhex("7f 50 00 00 cf"), 1, b"AC\x02\x09\x00\x0b"),
+                core_log, self.manifest)
+        run = {
+            "siov_statuses": "01 01 01 8b 01 01 01 01 01",
+            "post_interruption_idle": "00 00 00",
+            "recovery_ready": "02 09 00",
+            "recovery_reply": "01 04 09 00 0f 01 00 5a a5",
+            "recovery_terminal_idle": "00 00 00",
+        }
+        boot_runner._assert_interrupted_r_guest_state(run)
+        run["siov_statuses"] = "01 01 01 01 01 01 01 01 01"
+        with self.assertRaises(RuntimeError):
+            boot_runner._assert_interrupted_r_guest_state(run)
+
     def test_interrupted_r_fixture_sequence_and_guest_failure_check(self):
         self.assertEqual(projection.native_projection_fixture_ids(
             "native-interrupted-r-recovery", self.manifest), [

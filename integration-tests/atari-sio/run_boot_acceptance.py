@@ -13,6 +13,7 @@ from virtual_projection import (evidence_paths_for_boot, load_manifest,
                                 compare_altirra_embedded_native_core_dispatch,
                                 compare_altirra_embedded_native_wrong_r_retention,
                                 compare_altirra_embedded_native_reset_to_idle,
+                                compare_altirra_embedded_native_interrupted_r_recovery,
                                 ProjectionMismatch, scenario_result, validate_manifest,
                                 write_scenario_result)
 
@@ -810,18 +811,20 @@ def run_netsio_native_capacity_bounds(timeout, evidence_dir):
 
 
 def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_retention=False,
-                                              reset_to_idle=False):
+                                              reset_to_idle=False, interrupted_r_recovery=False):
     """Run the native guest through Altirra's embedded production endpoint.
 
     The normal profile's NetSIO custom device is removed, then the actual
     fujinetnio device is added with its explicit projection-only core route.
     There is no hub, UDP endpoint, or replacement Q/W/P/R implementation.
     """
-    if wrong_r_retention and reset_to_idle:
+    if sum((wrong_r_retention, reset_to_idle, interrupted_r_recovery)) > 1:
         raise ValueError('embedded native projection variants are mutually exclusive')
-    scenario_id = ('native-reset-to-idle' if reset_to_idle else
+    scenario_id = ('native-interrupted-r-recovery' if interrupted_r_recovery else
+                   'native-reset-to-idle' if reset_to_idle else
                    'native-wrong-r-retention' if wrong_r_retention else 'native-core-dispatch')
-    program = (NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
+    program = (NATIVE_INTERRUPTED_R_RECOVERY_XEX if interrupted_r_recovery else
+               NATIVE_RESET_TO_IDLE_XEX if reset_to_idle else
                NATIVE_WRONG_R_RETENTION_XEX if wrong_r_retention else NATIVE_CORE_DISPATCH_XEX)
     if not program.is_file():
         raise RuntimeError(f'{scenario_id} XEX is missing: {program}')
@@ -831,8 +834,10 @@ def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_ret
     config_dir.mkdir(exist_ok=True)
     before = set(Path('/tmp').glob('altirra-bridge-*.token'))
     cmd, env, temps = altirra_command(True, trace_serial=True, program=program)
-    cmd.extend(['--adddevice',
-                f'fujinetnio,configdir={config_dir},projectionfixture=true',
+    device_settings = f'fujinetnio,configdir={config_dir},projectionfixture=true'
+    if interrupted_r_recovery:
+        device_settings += ',projectioninterruptterminalr=true'
+    cmd.extend(['--adddevice', device_settings,
                 '--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
     altirra_log = (run / 'altirra.log').open('wb')
     process = None
@@ -845,6 +850,9 @@ def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_ret
             device = bridge.device_get('fujinetnio')
             if not device.get('present') or not device.get('healthy'):
                 raise RuntimeError(f'embedded fujinetnio device is not healthy: {device}')
+            if (interrupted_r_recovery and
+                    not device.get('settings', {}).get('projectioninterruptterminalr')):
+                raise RuntimeError('embedded terminal-R delivery fault is not enabled')
             bridge.resume()
         reset_event = None
         if reset_to_idle:
@@ -866,7 +874,8 @@ def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_ret
             wait_log(run / 'altirra.log', 'embedded FujiNet-NIO device ColdReset', timeout=timeout)
         result = inspect_native_core_dispatch(token, run, timeout,
                                               wrong_r_retention=wrong_r_retention,
-                                              reset_to_idle=reset_to_idle)
+                                              reset_to_idle=reset_to_idle,
+                                              interrupted_r_recovery=interrupted_r_recovery)
         altirra_log.flush()
         pokey = run / 'pokey-siodata.log'
         if not pokey.exists() or not pokey.stat().st_size:
@@ -880,6 +889,21 @@ def run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, wrong_r_ret
         if reset_event:
             result['reset_event'] = reset_event
             result['reset_event_evidence'] = str(run / 'embedded-device-reset-event.json')
+        if interrupted_r_recovery:
+            wait_log(run / 'altirra.log',
+                     'projection fault: accepted terminal R checksum 1a delivered as 1b',
+                     timeout=timeout)
+            fault = {
+                'kind': 'altirra-embedded-terminal-r-checksum-corrupted',
+                'accepted_terminal_r': True,
+                'expected_checksum': '1a',
+                'delivery_checksum': '1b',
+                'sio_boundary': 'IATDeviceSIOInterface::SendData',
+            }
+            fault_path = run / 'embedded-terminal-r-fault.json'
+            fault_path.write_text(json.dumps(fault, indent=2) + '\n')
+            result['delivery_fault'] = fault
+            result['delivery_fault_evidence'] = str(fault_path)
         return result
     finally:
         altirra_log.close()
@@ -896,6 +920,12 @@ def run_altirra_embedded_native_wrong_r_retention(timeout, evidence_dir):
 def run_altirra_embedded_native_reset_to_idle(timeout, evidence_dir):
     """Reset the live embedded device after READY without resetting the guest."""
     return run_altirra_embedded_native_core_dispatch(timeout, evidence_dir, reset_to_idle=True)
+
+
+def run_altirra_embedded_native_interrupted_r_recovery(timeout, evidence_dir):
+    """Interrupt only accepted terminal-R checksum delivery through Altirra SIO."""
+    return run_altirra_embedded_native_core_dispatch(
+        timeout, evidence_dir, interrupted_r_recovery=True)
 
 def write_netsio_boot_projection(run_result):
     """Write adapter-scoped virtual evidence from the existing boot lifecycle.
@@ -1396,6 +1426,61 @@ def write_netsio_native_interrupted_r_recovery_projection(run_result):
     return result
 
 
+def write_altirra_embedded_native_interrupted_r_recovery_projection(run_result):
+    """Record an accepted embedded R whose checksum delivery was interrupted."""
+    run = Path(run_result["run_dir"])
+    manifest = validate_manifest(load_manifest())
+    pokey = (run / "pokey-siodata.log").read_text(errors="replace")
+    altirra = (run / "altirra.log").read_text(errors="replace")
+    observed = compare_altirra_embedded_native_interrupted_r_recovery(pokey, altirra, manifest)
+    _assert_interrupted_r_guest_state(run_result)
+    fault = run_result.get("delivery_fault")
+    interrupted_r = observed[3]
+    if (not fault or fault.get("kind") != "altirra-embedded-terminal-r-checksum-corrupted" or
+            not fault.get("accepted_terminal_r") or fault.get("expected_checksum") != "1a" or
+            fault.get("delivery_checksum") != "1b" or
+            "projection fault: accepted terminal R checksum 1a delivered as 1b" not in altirra or
+            interrupted_r.get("siov_attempts", 0) < 2 or
+            not interrupted_r.get("delivery_interrupted") or
+            interrupted_r.get("expected_checksum") != "1a" or
+            interrupted_r["response"].get("checksum") != "1b" or
+            any(controls != ["N"] for controls in interrupted_r.get("consumed_retry_controls", ()) )):
+        raise RuntimeError("embedded accepted terminal R lacks consumed-slot interruption evidence")
+
+    # The P after failed guest delivery must prove endpoint consumption, not
+    # merely show that the runner synthesized an IDLE state.
+    stale_ready = _embedded_replace_response(
+        pokey, bytes.fromhex("7f 50 00 00 cf"), 1, b"AC\x02\x09\x00\x0b")
+    try:
+        compare_altirra_embedded_native_interrupted_r_recovery(stale_ready, altirra, manifest)
+    except ProjectionMismatch:
+        stale_negative_verified = True
+    else:
+        raise RuntimeError("stale embedded response after accepted R unexpectedly passed comparison")
+
+    successful_guest = dict(run_result)
+    successful_statuses = run_result["siov_statuses"].split()
+    successful_statuses[3] = "01"
+    successful_guest["siov_statuses"] = " ".join(successful_statuses)
+    try:
+        _assert_interrupted_r_guest_state(successful_guest)
+    except RuntimeError:
+        guest_negative_verified = True
+    else:
+        raise RuntimeError("successful embedded interrupted-R status unexpectedly passed verification")
+
+    result = scenario_result("altirra-embedded", "native-interrupted-r-recovery", observed,
+                             evidence_paths_for_boot(run, "altirra-embedded"),
+                             passed=run_result["guest_result"] == "NVP!")
+    result["delivery_fault"] = fault
+    result["delivery_fault_evidence"] = run_result["delivery_fault_evidence"]
+    result["negative_unconsumed_response_rejected"] = stale_negative_verified
+    result["negative_successful_guest_r_rejected"] = guest_negative_verified
+    path = write_scenario_result(run / "virtual-projection-results", result)
+    result["result_path"] = str(path)
+    return result
+
+
 def _capacity_response_data_mutation(trace):
     """Corrupt one captured middle byte of the 512-byte terminal R datagram."""
     prefix = "udp: Sending 513 bytes: "
@@ -1486,12 +1571,13 @@ def write_netsio_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-native-reset-to-idle-altirra-embedded-' if a.native_reset_to_idle_altirra_embedded else
+        evidence_kind = ('atari-sio-native-interrupted-r-recovery-altirra-embedded-' if a.native_interrupted_r_recovery_altirra_embedded else
+                         'atari-sio-native-reset-to-idle-altirra-embedded-' if a.native_reset_to_idle_altirra_embedded else
                          'atari-sio-native-wrong-r-retention-altirra-embedded-' if a.native_wrong_r_retention_altirra_embedded else
                          'atari-sio-native-core-dispatch-altirra-embedded-' if a.native_core_dispatch_altirra_embedded else
                          'atari-sio-native-capacity-bounds-' if a.native_capacity_bounds else
@@ -1510,11 +1596,26 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results only records the production netsio adapter')
     if sum((a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
+            a.native_interrupted_r_recovery_altirra_embedded,
             a.native_wrong_r_retention_altirra_embedded,
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.native_reset_to_idle_altirra_embedded:
+    if a.native_interrupted_r_recovery_altirra_embedded:
+        try:
+            result = run_altirra_embedded_native_interrupted_r_recovery(a.timeout, evidence_dir)
+            result['virtual_projection_result'] = write_altirra_embedded_native_interrupted_r_recovery_projection(result)
+            if result['virtual_projection_result']['status'] != 'pass':
+                raise RuntimeError('embedded native-interrupted-r-recovery evidence is '
+                                   f"{result['virtual_projection_result']['status']}")
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.native_reset_to_idle_altirra_embedded:
         try:
             result = run_altirra_embedded_native_reset_to_idle(a.timeout, evidence_dir)
             result['virtual_projection_result'] = write_altirra_embedded_native_reset_to_idle_projection(result)

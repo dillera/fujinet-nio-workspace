@@ -98,6 +98,18 @@ python3 integration-tests/atari-sio/run_boot_acceptance.py \
   --native-reset-to-idle-altirra-embedded --timeout 30
 ```
 
+The embedded interrupted-R projection enables a projection-only Altirra SIO
+scheduler fault after the production frontend has accepted and consumed the
+first terminal R. It sends the literal R payload with its checksum deliberately
+corrupted, so the guest records a failed SIOV call and its physical retries
+receive NAK from the now-consumed endpoint. The captured POKEY trace must then
+show P(IDLE), a distinct second core dispatch, and the exact second response.
+
+```sh
+python3 integration-tests/atari-sio/run_boot_acceptance.py \
+  --native-interrupted-r-recovery-altirra-embedded --timeout 30
+```
+
 The config boot READ vectors are pinned source-image goldens, unlike the
 synthetic framing vectors elsewhere in the matrix.  They come from
 `repos/nio-core-apps/build/atari/disk/boot/autorun.atr`, whose SHA-256 is

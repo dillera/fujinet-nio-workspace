@@ -519,7 +519,7 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
     to the independent literal fixture.
     """
     if projection_id not in {"native-core-dispatch", "native-wrong-r-retention",
-                             "native-reset-to-idle"}:
+                             "native-reset-to-idle", "native-interrupted-r-recovery"}:
         raise ProjectionError(f"{projection_id}: no embedded projection comparison is implemented")
     manifest = load_manifest() if manifest is None else manifest
     fixture_data = load_json(NIO_PATH) if fixture_data is None else fixture_data
@@ -527,7 +527,8 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
     ids = native_projection_fixture_ids(projection_id, manifest)
     dispatches = [int(value) for value in re.findall(
         r"core dispatch fixture route invocation (\d+)", altirra_log)]
-    expected_dispatches = [1, 2] if projection_id == "native-reset-to-idle" else [1]
+    expected_dispatches = ([1, 2] if projection_id in {
+        "native-reset-to-idle", "native-interrupted-r-recovery"} else [1])
     if dispatches != expected_dispatches:
         raise ProjectionMismatch(
             f"{projection_id}: expected embedded real-core dispatches {expected_dispatches}, "
@@ -562,6 +563,16 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
             if not attempts:
                 raise ProjectionMismatch("r-wrong-length-retains: missing wrong-length R")
             continue
+        if identifier == "r-core-dispatch-interrupted-consumes":
+            attempts = 0
+            while physical_index < len(physical_frames) and physical_frames[physical_index][0] == expected:
+                expanded_ids.append(identifier if attempts == 0 else "r-core-dispatch-consumed-nak")
+                physical_index += 1
+                attempts += 1
+            if attempts < 2:
+                raise ProjectionMismatch(
+                    "r-core-dispatch-interrupted-consumes: missing consumed-slot R retry")
+            continue
         if physical_index >= len(physical_frames) or physical_frames[physical_index][0] != expected:
             raise ProjectionMismatch(f"{identifier}: POKEY command frame differs from literal fixture")
         expanded_ids.append(identifier)
@@ -576,16 +587,25 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
                          if ordinal + 1 < len(physical_frames) else float("inf"))
         window = [(direction, byte) for direction, byte, position in events
                   if command_position < position < next_position]
-        fixture = fixtures[identifier]
-        command = fixture["command"]
-        controls, payload, payload_checksum = _fixture_reply(fixture, command)
+        if identifier == "r-core-dispatch-consumed-nak":
+            fixture = fixtures["r-core-dispatch-interrupted-consumes"]
+            command = "R"
+            controls, payload, payload_checksum = [ord("N")], b"", None
+        else:
+            fixture = fixtures[identifier]
+            command = fixture["command"]
+            controls, payload, payload_checksum = _fixture_reply(fixture, command)
         response = [byte for direction, byte in window if direction == "Receive"]
         # The fixture's W ACK accepts its command frame.  Real SIO also has a
         # distinct data-frame ACK before terminal COMPLETE; it must follow
         # Altirra's post-data timing guard and is captured separately here.
         physical_controls = ([ord("A")] if command == "W" else []) + controls
+        interrupted_delivery = identifier == "r-core-dispatch-interrupted-consumes"
+        delivered_checksum = (payload_checksum ^ 0x01
+                              if interrupted_delivery and payload_checksum is not None
+                              else payload_checksum)
         expected_response = bytes(physical_controls) + payload + (
-            bytes((payload_checksum,)) if payload_checksum is not None else b"")
+            bytes((delivered_checksum,)) if delivered_checksum is not None else b"")
         if bytes(response) != expected_response:
             raise ProjectionMismatch(
                 f"{identifier}: POKEY response bytes differ from literal fixture")
@@ -604,12 +624,24 @@ def compare_altirra_embedded_native_projection(pokey_log, altirra_log, projectio
         entry["response"] = {
             "controls": [chr(value) for value in physical_controls],
             "payload": payload.hex(" "),
-            "checksum": None if payload_checksum is None else f"{payload_checksum:02x}",
+            "checksum": None if delivered_checksum is None else f"{delivered_checksum:02x}",
         }
+        if interrupted_delivery:
+            entry["delivery_interrupted"] = True
+            entry["expected_checksum"] = f"{payload_checksum:02x}"
         physical_observed.append(entry)
 
     observed = []
     for entry in physical_observed:
+        if entry["fixture"] == "r-core-dispatch-consumed-nak":
+            if not observed or observed[-1]["fixture"] != "r-core-dispatch-interrupted-consumes":
+                raise ProjectionMismatch("consumed terminal-R retry did not follow accepted terminal R")
+            observed[-1]["siov_attempts"] += 1
+            observed[-1]["consumed_retry_controls"].append(entry["response"]["controls"])
+            continue
+        if entry["fixture"] == "r-core-dispatch-interrupted-consumes":
+            entry["siov_attempts"] = 1
+            entry["consumed_retry_controls"] = []
         if entry["fixture"] == "r-wrong-length-retains":
             if observed and observed[-1]["fixture"] == entry["fixture"]:
                 observed[-1]["siov_attempts"] += 1
@@ -642,6 +674,13 @@ def compare_altirra_embedded_native_reset_to_idle(pokey_log, altirra_log,
     """Byte-verify embedded reset-to-idle with distinct post-reset dispatch."""
     return compare_altirra_embedded_native_projection(
         pokey_log, altirra_log, "native-reset-to-idle", manifest, fixture_data)
+
+
+def compare_altirra_embedded_native_interrupted_r_recovery(pokey_log, altirra_log,
+                                                            manifest=None, fixture_data=None):
+    """Verify accepted R has a corrupted delivered checksum, then recovers."""
+    return compare_altirra_embedded_native_projection(
+        pokey_log, altirra_log, "native-interrupted-r-recovery", manifest, fixture_data)
 
 
 def evidence_paths_for_boot(run_dir: Path, adapter: str):
