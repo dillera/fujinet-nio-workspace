@@ -910,8 +910,50 @@ Fresh evidence:
   contains POKEY/Altirra logs, screenshot, guest inspection, both File backing
   stores, Disk inspection and `embedded-public-malformed-r-fault.json`.
 
-Story 2.4 remains open: embedded accepted-but-interrupted terminal-R and
-reset recovery are still deferred.
+At that increment, embedded accepted-but-interrupted terminal-R and reset
+recovery remained deferred.
+
+### Embedded accepted-but-interrupted terminal-R recovery
+
+The embedded public-acceptance composition now has the mutually exclusive,
+test-only `publicacceptanceinterruptterminalr` setting.  It applies only after
+the real original 54-byte File Write has been accepted and its 17-byte response
+is READY.  The production `AtariSioNioFrontend` accepts the correct
+`R(AUX=$0011)` and consumes its response first.  Only then does Altirra's real
+SIO scheduling boundary replace the delivered SIO checksum (`$46` with
+`$47` in the recorded run); neither the endpoint response slot nor the guest
+result block is altered directly.
+
+The live `fnaccept.xex` run records that one original File Write dispatch and
+its persistent `ATARI-FILE-24` marker, followed by the downstream checksum
+failure.  The Atari OS made 14 observed physical retries of the same terminal
+R; each reached the already-consumed endpoint and received a real NAK.  The
+next distinct public File operation observed canonical P(IDLE), issued its own
+`7f 57 49 00 20` W directly (with no stale-response drain), then completed its
+Write/Read pair and persisted `ATARI-FILE-RECOVERY-24`.  Real core evidence is
+exactly File Write/Write/Read, with Clock once, Network four times and Disk
+four times.  The guest reports the original public call as failure `$10`, while
+Clock, Network, Disk, explicit Q flags `$00`, PROC `not-advertised`, heartbeat,
+memory safety and `ADP!` remain successful.
+
+The focused embedded callback CTest proves the accepted R delivery mutation,
+then its consumed-slot NAK and IDLE behavior.  The runner compares the actual
+POKEY response bytes—not synthetic expectations—including the original full
+response and bad downstream checksum, all retry NAKs, canonical IDLE bytes,
+and the following distinct W.  Its negative tests reject missing corruption,
+a good delivered checksum, false guest success, stale READY, original-W
+replay, an attempted post-consumption drain R, duplicate File dispatch and a
+missing original backing-store side effect.
+
+Fresh evidence:
+
+- `test-evidence/atari-sio-public-api-interrupted-r-recovery-altirra-embedded-20261024-002834/`
+  contains the POKEY capture, Altirra log and scheduler fault event, guest RAM
+  inspection, screenshot, independent File/Disk backing checks, and
+  `embedded-public-interrupted-r-fault.json` binding the accepted endpoint R
+  to the corrupted downstream delivery and post-consumption IDLE.
+
+Story 2.4 remains open: embedded reset recovery is still deferred.
 
 ## Out of scope
 

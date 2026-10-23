@@ -210,6 +210,99 @@ class PublicApiClockTests(unittest.TestCase):
             boot_runner._validate_embedded_public_file_backing(
                 backing, malformed_r_recovery=True)
 
+    def test_embedded_interrupted_r_requires_consumption_idle_and_distinct_w(self):
+        def window(frame, receives):
+            lines = [f"[SIODATA] SendCmd  ${value:02X} >" for value in frame]
+            lines.extend(f"[SIODATA] Receive      < ${value:02X}" for value in receives)
+            return '\n'.join(lines) + '\n'
+
+        q = bytes.fromhex('7f 51 00 00 d0')
+        clock_w = bytes.fromhex('7f 57 06 00 dc')
+        poll = bytes.fromhex('7f 50 00 00 cf')
+        clock_r = bytes.fromhex('7f 52 13 00 e4')
+        initial_w = bytes.fromhex('7f 57 36 00 0d')
+        accepted_r = bytes.fromhex('7f 52 11 00 e2')
+        recovery_w = bytes.fromhex('7f 57 49 00 20')
+        response = boot_runner._file_write_response(boot_runner.PUBLIC_API_FILE_MARKER)
+        delivered = b'AC' + response + bytes((boot_runner._sio_checksum(response) ^ 1,))
+        pokey = ''.join((
+            window(q, b''), window(clock_w, b''), window(poll, b''), window(clock_r, b''),
+            window(initial_w, b''), window(poll, b''),
+            window(accepted_r, delivered), window(accepted_r, b'N'),
+            window(poll, b'AC\0\0\0\0'), window(recovery_w, b''),
+        ))
+        log = 'fault: public File terminal R checksum 46 delivered as 47\n'
+        fault = boot_runner._validate_embedded_interrupted_terminal_r_fault(pokey, log)
+        self.assertEqual(fault['consumed_r_naks'], 1)
+        self.assertEqual(fault['post_consumption_state'], 'idle')
+        self.assertEqual(fault['distinct_w_after_idle'], recovery_w.hex(' '))
+
+        # Missing corruption, a good delivery, stale READY, a replay, and an
+        # attempted drain after consumption must never satisfy the proof.
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_interrupted_terminal_r_fault(pokey, '')
+        good_delivery = b'AC' + response + bytes((boot_runner._sio_checksum(response),))
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_interrupted_terminal_r_fault(
+                pokey.replace(window(accepted_r, delivered), window(accepted_r, good_delivery)), log)
+        stale_ready = b'AC\x02\x11\0\x13'
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_interrupted_terminal_r_fault(
+                pokey.replace(window(poll, b'AC\0\0\0\0'), window(poll, stale_ready)), log)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_interrupted_terminal_r_fault(
+                pokey.replace(window(recovery_w, b''), window(initial_w, b'')), log)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_interrupted_terminal_r_fault(
+                pokey.replace(window(poll, b'AC\0\0\0\0') + window(recovery_w, b''),
+                              window(poll, b'AC\0\0\0\0') + window(accepted_r, b'')), log)
+
+        core_log = '\n'.join((
+            'ClockDevice routed request',
+            'FileDevice routed request 1 command=4',
+            'FileDevice routed request 2 command=4',
+            'FileDevice routed request 3 command=3',
+            'NetworkDevice routed request 1 command=1',
+            'NetworkDevice routed request 2 command=3',
+            'NetworkDevice routed request 3 command=2',
+            'NetworkDevice routed request 4 command=4',
+            'Network fixture open count=1 method=2 url=fixture://nio-accept',
+            'Network fixture write count=1 bytes=12 valid=1',
+            'Network fixture close count=1',
+            'Disk fixture mounted slot=2 path=/fnaccept-disk.atr sector_bytes=128 sectors=16',
+            'DiskDevice routed request 1 command=5',
+            'DiskDevice routed request 2 command=4',
+            'DiskDevice routed request 3 command=14',
+            'DiskDevice routed request 4 command=3',
+        ))
+        boot_runner._validate_embedded_public_core_log(core_log, retained_ready_recovery=True)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_core_log(
+                core_log + '\nFileDevice routed request 4 command=4', retained_ready_recovery=True)
+        state = {
+            'file_write_status': '10', 'file_rejected_w_status': '10',
+            'file_failure_status': '10', 'file_recovery_attempted': '01',
+            'file_recovery_kind': '01', 'file_recovery_write_status': '00',
+            'file_recovery_write_device_status': '00', 'file_recovery_write_response_length': 10,
+            'file_recovery_write_count': len(boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER),
+            'file_recovery_verify': '01',
+        }
+        boot_runner._validate_public_file_recovery_state(state)
+        state['file_write_status'] = '00'
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_public_file_recovery_state(state)
+        with tempfile.TemporaryDirectory() as temporary:
+            backing = Path(temporary)
+            (backing / boot_runner.PUBLIC_API_FILE_RECOVERY_NAME).write_bytes(
+                boot_runner.PUBLIC_API_FILE_RECOVERY_MARKER)
+            with self.assertRaises(RuntimeError):
+                boot_runner._validate_embedded_public_file_backing(
+                    backing, interrupted_r_recovery=True)
+            (backing / boot_runner.PUBLIC_API_FILE_NAME).write_bytes(
+                boot_runner.PUBLIC_API_FILE_MARKER)
+            boot_runner._validate_embedded_public_file_backing(
+                backing, interrupted_r_recovery=True)
+
     def test_ready_length_relay_requires_retained_response_drain_before_new_w(self):
         def frame(command, aux=0):
             value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))
