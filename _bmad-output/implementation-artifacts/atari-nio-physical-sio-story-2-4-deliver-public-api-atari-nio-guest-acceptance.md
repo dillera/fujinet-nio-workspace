@@ -6,6 +6,7 @@ type: 'feature'
 created: '2026-10-23'
 status: 'in-progress'
 baseline_workspace_commit: '204887e1'
+baseline_commit: '35c3e71c'
 context:
   - 'docs/agent-test-policy.md'
   - '_bmad-output/specs/spec-atari-nio-physical-sio/SPEC.md'
@@ -954,6 +955,44 @@ Fresh evidence:
   to the corrupted downstream delivery and post-consumption IDLE.
 
 Story 2.4 remains open: embedded reset recovery is still deferred.
+
+### Embedded device-reset recovery
+
+The embedded public fixture now has the mutually exclusive test-only
+`publicacceptanceresetafterready` setting.  It queues the genuine original
+File P(READY) reply and then invokes the installed device's actual
+`ColdReset()` lifecycle before terminal R; it neither calls the frontend reset
+directly nor alters guest memory, CPU state, or NIO wire replies.  Live
+evidence records the lifecycle event, 28 real R/NAK retries, canonical
+P(IDLE), then the distinct recovery W.  The original and recovery markers are
+both independently persistent, while Clock, Network, Disk, Q flags zero,
+PROC not-advertised, Graphics 0/memory checks, heartbeat and `ADP!` pass.
+
+Fresh evidence:
+
+- `test-evidence/atari-sio-public-api-reset-recovery-altirra-embedded-20261024-011136/`
+
+Story 2.4 remains open for the final cross-adapter audit only.
+
+### Approved current increment: embedded device-reset recovery
+
+Extend only the existing embedded public-acceptance path.  After the original
+side-effecting File W is accepted and real P(READY) has exposed its retained
+response—but before terminal R—invoke the actual embedded FujiNet-NIO
+`ColdReset()` through the established scoped AltirraBridge/device-reset
+mechanism.  The Atari CPU, OS and guest stay running; no direct frontend reset,
+fabricated NAK, guest-memory error injection or guest reset is permitted.
+
+The run must observe the actual lifecycle reset and prove original File
+Write/persistence exactly once, terminal-R failure and real physical R/NAK
+retries, followed by P(IDLE) before a distinct recovery W (no stale R drain or
+automatic replay).  The recovery File Write/Read must persist its separate
+marker exactly once.  Capture POKEY command/data/control/checksum bytes,
+Altirra reset diagnostics, guest result/status and memory/Graphics-0 checks,
+core dispatch ordering/counts, screenshot and both backing files.  Add focused
+negative checks for a missing or late reset, stale READY, successful R,
+original-W replay, W before IDLE, wrong dispatch counts and missing backing
+effects.  Preserve all previous public and Story 2.3 modes.
 
 ## Out of scope
 

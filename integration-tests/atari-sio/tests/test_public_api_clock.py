@@ -303,6 +303,53 @@ class PublicApiClockTests(unittest.TestCase):
             boot_runner._validate_embedded_public_file_backing(
                 backing, interrupted_r_recovery=True)
 
+    def test_embedded_reset_requires_lifecycle_naks_idle_and_distinct_w(self):
+        def window(frame, receives):
+            lines = [f"[SIODATA] SendCmd  ${value:02X} >" for value in frame]
+            lines.extend(f"[SIODATA] Receive      < ${value:02X}" for value in receives)
+            return '\n'.join(lines) + '\n'
+
+        q = bytes.fromhex('7f 51 00 00 d0')
+        clock_w = bytes.fromhex('7f 57 06 00 dc')
+        poll = bytes.fromhex('7f 50 00 00 cf')
+        clock_r = bytes.fromhex('7f 52 13 00 e4')
+        initial_w = bytes.fromhex('7f 57 36 00 0d')
+        terminal = bytes.fromhex('7f 52 11 00 e2')
+        recovery = bytes.fromhex('7f 57 49 00 20')
+        pokey = ''.join((
+            window(q, b''), window(clock_w, b''), window(poll, b''), window(clock_r, b''),
+            window(initial_w, b''), window(poll, b'AC\x02\x11\0\x13'),
+            window(terminal, b'N'), window(terminal, b'N'),
+            window(poll, b'AC\0\0\0\0'), window(recovery, b''),
+        ))
+        event = {
+            'reset': True, 'lifecycle': 'cold', 'tag': 'fujinetnio', 'path': '/fujinetnio',
+            'ready_checkpoint': {
+                'ready_bytes': '02 11 00',
+                'siov_entry': {'dcb': {'device': '0x7f', 'command': '0x50'}},
+                'siov_return_dcb': {'command': '0x50'},
+            },
+        }
+        fault = boot_runner._validate_embedded_public_reset_fault(
+            pokey, 'embedded FujiNet-NIO device ColdReset\n', event)
+        self.assertEqual(fault['terminal_r_naks'], 2)
+        self.assertEqual(fault['post_reset_state'], 'idle')
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_reset_fault(pokey, '', event)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_reset_fault(
+                pokey.replace(window(poll, b'AC\0\0\0\0'), window(poll, b'AC\x02\x11\0\x13')),
+                'embedded FujiNet-NIO device ColdReset\n', event)
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_reset_fault(
+                pokey.replace(window(recovery, b''), window(initial_w, b'')),
+                'embedded FujiNet-NIO device ColdReset\n', event)
+        missing_checkpoint = dict(event)
+        missing_checkpoint['reset'] = False
+        with self.assertRaises(RuntimeError):
+            boot_runner._validate_embedded_public_reset_fault(
+                pokey, 'embedded FujiNet-NIO device ColdReset\n', missing_checkpoint)
+
     def test_ready_length_relay_requires_retained_response_drain_before_new_w(self):
         def frame(command, aux=0):
             value = bytes((0x7f, ord(command), aux & 0xff, aux >> 8))

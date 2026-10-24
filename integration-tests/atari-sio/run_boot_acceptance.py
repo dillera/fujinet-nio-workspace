@@ -1187,6 +1187,92 @@ def cold_reset_after_device_ready(token):
     with AltirraBridge.from_token_file(token) as b:
         b.cold_reset()
 
+
+def reset_embedded_after_public_file_ready(bridge, timeout):
+    """Cold-reset the embedded device after the original File P(READY).
+
+    The public guest deliberately owns no SIO framing, so its ``fn_raw_call``
+    cannot provide a test pause between the library's P and R.  Instead, use
+    the real Atari OS SIOV boundary: stop at the original File P call, then at
+    that call's return address after the three READY bytes are in the DCB
+    buffer.  The Atari CPU remains paused there while the bridge performs the
+    device's actual ColdReset; resuming lets the unmodified library issue its
+    normal terminal R against the reset production endpoint.
+    """
+    siov_bp = bridge.bp_set(0xE459)
+    deadline = time.monotonic() + timeout
+    saw_initial_file_write = False
+    samples = []
+    try:
+        while time.monotonic() < deadline:
+            bridge.cycles(10_000_000)
+            clock = bridge.clock()
+            raw_dcb = bridge.peek(0x0300, 12)
+            dcb = decode_dcb(raw_dcb)
+            regs = bridge.regs()
+            sample = {'clock': clock, 'dcb': dcb, 'pc': regs['PC']}
+            samples.append(sample)
+
+            # The public File helper supplies an application payload; the
+            # backend's W carries that payload plus the six-byte FujiBus
+            # packet header (the literal SIO command is 7f 57 36 00 0d).
+            if (dcb['device'] == '0x7f' and dcb['command'] == '0x57' and
+                    dcb['aux'] == PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES + 6):
+                saw_initial_file_write = True
+            if not (saw_initial_file_write and dcb['device'] == '0x7f' and
+                    dcb['command'] == '0x50' and dcb['aux'] == 0):
+                bridge.resume()
+                continue
+
+            # SIOV is entered via JSR.  The stacked return address is one
+            # byte before the first caller instruction after SIOV.
+            stack = int(regs['S'].replace('$', '0x'), 0)
+            raw_return = bridge.peek(0x0100 + stack + 1, 2)
+            return_pc = (raw_return[0] | (raw_return[1] << 8)) + 1
+            bridge.bp_clear(siov_bp)
+            siov_bp = None
+            return_bp = bridge.bp_set(return_pc)
+            try:
+                bridge.cycles(10_000_000)
+                return_clock = bridge.clock()
+                returned_dcb = decode_dcb(bridge.peek(0x0300, 12))
+                buffer = int(returned_dcb['buffer'], 16)
+                ready = bridge.peek(buffer, 3)
+                if ready != b'\x02\x11\x00':
+                    raise RuntimeError(
+                        'embedded public reset checkpoint did not expose the '
+                        f'original File P(READY): {ready.hex(" ")}')
+                reset_event = bridge.device_cold_reset('fujinetnio')
+                if (not reset_event.get('reset') or reset_event.get('lifecycle') != 'cold' or
+                        reset_event.get('tag') != 'fujinetnio' or
+                        reset_event.get('path') != '/fujinetnio'):
+                    raise RuntimeError(
+                        f'embedded device cold reset was not acknowledged: {reset_event}')
+                reset_event['ready_checkpoint'] = {
+                    'siov_entry': sample,
+                    'siov_return_clock': return_clock,
+                    'siov_return_dcb': returned_dcb,
+                    'ready_bytes': ready.hex(' '),
+                    'return_pc': f'0x{return_pc:04x}',
+                    'preceding_siov': samples[:-1],
+                }
+                # Preserve a failing guest's result block long enough for the
+                # runner to inspect it instead of immediately returning to
+                # the boot ATR and overwriting the diagnostic RAM region.
+                # This is a diagnostic execution stop only; it neither
+                # changes the guest nor fakes an SIO outcome.
+                reset_event['guest_exit_breakpoint'] = bridge.bp_set(0x0d41)
+                return reset_event
+            finally:
+                bridge.bp_clear(return_bp)
+        raise RuntimeError(
+            'did not observe the original public File P(READY) SIOV checkpoint; '
+            f'last samples={samples[-8:]}')
+    finally:
+        if siov_bp is not None:
+            bridge.bp_clear(siov_bp)
+        bridge.resume()
+
 def capture_first_boot_read(token):
     """Pause at the OS SIO vector and record the actual first D1 READ DCB.
 
@@ -2907,12 +2993,47 @@ def _validate_embedded_interrupted_terminal_r_fault(pokey, trace):
     }
 
 
+def _validate_embedded_public_reset_fault(pokey, trace, reset_event):
+    """Require a real device reset to discard READY before terminal R."""
+    windows = _embedded_native_windows(pokey)
+    commands = [window[0] for window in windows]
+    initial = bytes.fromhex('7f 57 36 00 0d')
+    terminal = bytes.fromhex('7f 52 11 00 e2')
+    poll = bytes.fromhex('7f 50 00 00 cf')
+    recovery = bytes.fromhex('7f 57 49 00 20')
+    try:
+        ready_index = commands.index(poll, commands.index(initial) + 1)
+    except ValueError as exc:
+        raise RuntimeError('embedded reset evidence lacks original File W/READY P') from exc
+    cursor = ready_index + 1
+    retries = []
+    while cursor < len(commands) and commands[cursor] == terminal:
+        retries.append(commands[cursor])
+        cursor += 1
+    if not retries or cursor + 1 >= len(commands) or commands[cursor] != poll or commands[cursor + 1] != recovery:
+        raise RuntimeError('embedded reset recovery lacks R/NAK retries then P(IDLE) before distinct W')
+    for index in range(ready_index + 1, cursor):
+        _, begin, end = windows[index]
+        if re.findall(r"Receive\s+< \$([0-9A-F]{2})", pokey[begin:end]) != ['4E']:
+            raise RuntimeError('embedded reset terminal-R retry was not a real NAK')
+    _, idle_begin, idle_end = windows[cursor]
+    if re.findall(r"Receive\s+< \$([0-9A-F]{2})", pokey[idle_begin:idle_end]) != ['41', '43', '00', '00', '00', '00']:
+        raise RuntimeError('embedded reset recovery did not observe canonical P(IDLE)')
+    if (not reset_event.get('reset') or reset_event.get('lifecycle') != 'cold' or
+            reset_event.get('tag') != 'fujinetnio' or reset_event.get('path') != '/fujinetnio' or
+            'embedded FujiNet-NIO device ColdReset' not in trace):
+        raise RuntimeError('embedded public reset lacks acknowledged device lifecycle evidence')
+    return {'kind': 'altirra-embedded-public-device-cold-reset',
+            'terminal_r_naks': len(retries), 'post_reset_state': 'idle',
+            'distinct_w_after_idle': recovery.hex(' ')}
+
+
 def _validate_embedded_public_file_backing(config_dir, rejected_w_recovery=False,
                                            malformed_r_recovery=False,
-                                           interrupted_r_recovery=False):
+                                           interrupted_r_recovery=False, reset_recovery=False):
     """Require the real FileDevice side effects implied by public recovery mode."""
     config_dir = Path(config_dir)
-    recovery = rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery
+    recovery = rejected_w_recovery or malformed_r_recovery or interrupted_r_recovery or reset_recovery
     backing_name = PUBLIC_API_FILE_RECOVERY_NAME if recovery else PUBLIC_API_FILE_NAME
     backing_marker = PUBLIC_API_FILE_RECOVERY_MARKER if recovery else PUBLIC_API_FILE_MARKER
     backing_file = config_dir / backing_name
@@ -2921,17 +3042,17 @@ def _validate_embedded_public_file_backing(config_dir, rejected_w_recovery=False
     original_file = config_dir / PUBLIC_API_FILE_NAME
     if rejected_w_recovery and original_file.exists():
         raise RuntimeError('embedded rejected-W acceptance unexpectedly persisted the original File write')
-    if malformed_r_recovery or interrupted_r_recovery:
+    if malformed_r_recovery or interrupted_r_recovery or reset_recovery:
         if not original_file.is_file() or original_file.read_bytes() != PUBLIC_API_FILE_MARKER:
             raise RuntimeError('embedded terminal-R recovery did not persist the original File write exactly once')
-    return backing_file, original_file if (malformed_r_recovery or interrupted_r_recovery) else None
+    return backing_file, original_file if (malformed_r_recovery or interrupted_r_recovery or reset_recovery) else None
 
 
 def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_recovery=False,
                                           malformed_r_recovery=False,
-                                          interrupted_r_recovery=False):
+                                          interrupted_r_recovery=False, reset_recovery=False):
     """Run the public cc65 guest through Altirra's embedded production device."""
-    if sum((rejected_w_recovery, malformed_r_recovery, interrupted_r_recovery)) > 1:
+    if sum((rejected_w_recovery, malformed_r_recovery, interrupted_r_recovery, reset_recovery)) > 1:
         raise ValueError('embedded public recovery faults are mutually exclusive')
     if not PUBLIC_API_CLOCK_XEX.is_file():
         raise RuntimeError(f'public API Clock XEX is missing: {PUBLIC_API_CLOCK_XEX}')
@@ -2948,6 +3069,8 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
         device_settings += ',publicacceptancemalformedreadylength=true'
     if interrupted_r_recovery:
         device_settings += ',publicacceptanceinterruptterminalr=true'
+    if reset_recovery:
+        device_settings += ',publicacceptanceresetafterready=true'
     cmd.extend(['--adddevice', device_settings,
                 '--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
     altirra_log = (run / 'altirra.log').open('wb')
@@ -2968,13 +3091,16 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
                     (malformed_r_recovery and not device.get('settings', {}).get(
                         'publicacceptancemalformedreadylength')) or
                     (interrupted_r_recovery and not device.get('settings', {}).get(
-                        'publicacceptanceinterruptterminalr'))):
+                        'publicacceptanceinterruptterminalr')) or
+                    (reset_recovery and not device.get('settings', {}).get(
+                        'publicacceptanceresetafterready'))):
                 raise RuntimeError(f'embedded public acceptance device is not healthy/configured: {device}')
             bridge.resume()
         state = inspect_public_api_clock(token, run, timeout,
                                          rejected_w_recovery=rejected_w_recovery,
                                          malformed_r_recovery=malformed_r_recovery,
-                                         interrupted_r_recovery=interrupted_r_recovery)
+                                         interrupted_r_recovery=interrupted_r_recovery,
+                                         reset_recovery=reset_recovery)
         altirra_log.flush()
         pokey_path = run / 'pokey-siodata.log'
         if not pokey_path.exists() or not pokey_path.stat().st_size:
@@ -2986,14 +3112,16 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
         pokey = pokey_path.read_text(errors='replace')
         trace = (run / 'altirra.log').read_text(errors='replace')
         state['adapter'] = 'altirra-embedded'
-        state['native_observations'] = _validate_embedded_public_api_trace(
+        state['native_observations'] = (_validate_embedded_public_api_trace(
             pokey, rejected_w_recovery=rejected_w_recovery,
             malformed_r_recovery=malformed_r_recovery,
             interrupted_r_recovery=interrupted_r_recovery)
-        state['capability_wire'] = state['native_observations'][0]
+            if not reset_recovery else [])
+        state['capability_wire'] = (state['native_observations'][0]
+                                    if state['native_observations'] else None)
         _validate_embedded_public_core_log(trace,
                                            retained_ready_recovery=(malformed_r_recovery or
-                                                                     interrupted_r_recovery))
+                                                                     interrupted_r_recovery or reset_recovery))
 
         if rejected_w_recovery:
             fault = _validate_embedded_rejected_file_w_fault(pokey, trace)
@@ -3013,12 +3141,29 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
             fault_path.write_text(json.dumps(fault, indent=2) + '\n')
             state['interrupted_r_fault'] = fault
             state['interrupted_r_fault_evidence'] = str(fault_path)
+        if reset_recovery:
+            reset_event = {'reset': True, 'lifecycle': 'cold', 'tag': 'fujinetnio',
+                           'path': '/fujinetnio',
+                           'trigger': 'publicacceptanceresetafterready'}
+            if trace.count('fault: public File P READY triggered embedded ColdReset') != 1:
+                raise RuntimeError('embedded public reset did not trigger exactly once after READY')
+            if trace.count('embedded FujiNet-NIO device ColdReset') < 3:
+                raise RuntimeError('embedded public reset lacks its actual device lifecycle event')
+            fault = _validate_embedded_public_reset_fault(pokey, trace, reset_event)
+            fault_path = run / 'embedded-public-reset-fault.json'
+            fault_path.write_text(json.dumps(fault, indent=2) + '\n')
+            reset_path = run / 'embedded-public-reset-event.json'
+            reset_path.write_text(json.dumps(reset_event, indent=2) + '\n')
+            state['reset_fault'] = fault
+            state['reset_fault_evidence'] = str(fault_path)
+            state['reset_event'] = reset_event
+            state['reset_event_evidence'] = str(reset_path)
 
         backing_file, original_file = _validate_embedded_public_file_backing(
             config_dir, rejected_w_recovery=rejected_w_recovery,
             malformed_r_recovery=malformed_r_recovery,
-            interrupted_r_recovery=interrupted_r_recovery)
-        if malformed_r_recovery or interrupted_r_recovery:
+            interrupted_r_recovery=interrupted_r_recovery, reset_recovery=reset_recovery)
+        if malformed_r_recovery or interrupted_r_recovery or reset_recovery:
             state['retained_response_backing_file'] = str(original_file)
             state['retained_response_backing_bytes'] = PUBLIC_API_FILE_MARKER.hex(' ')
         disk_image = config_dir / PUBLIC_API_DISK_IMAGE_NAME
@@ -3915,12 +4060,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-reset-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-interrupted-r-recovery-altirra-embedded-' if a.public_api_interrupted_r_recovery_altirra_embedded else
+        evidence_kind = ('atari-sio-public-api-reset-recovery-altirra-embedded-' if a.public_api_reset_recovery_altirra_embedded else
+                         'atari-sio-public-api-interrupted-r-recovery-altirra-embedded-' if a.public_api_interrupted_r_recovery_altirra_embedded else
                          'atari-sio-public-api-malformed-r-recovery-altirra-embedded-' if a.public_api_malformed_r_recovery_altirra_embedded else
                          'atari-sio-public-api-rejected-w-recovery-altirra-embedded-' if a.public_api_rejected_w_recovery_altirra_embedded else
                          'atari-sio-public-api-reset-recovery-' if a.public_api_reset_recovery else
@@ -3948,7 +4094,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_reset_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -3956,7 +4102,17 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_interrupted_r_recovery_altirra_embedded:
+    if a.public_api_reset_recovery_altirra_embedded:
+        try:
+            result = run_altirra_embedded_public_api_clock(a.timeout, evidence_dir, reset_recovery=True)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.public_api_interrupted_r_recovery_altirra_embedded:
         try:
             result = run_altirra_embedded_public_api_clock(
                 a.timeout, evidence_dir, interrupted_r_recovery=True)
