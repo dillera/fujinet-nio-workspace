@@ -429,3 +429,136 @@ HATABS ownership check.
 The accepted fixed installer, its idempotence/foreign-owner tests, the public
 API acceptance, library gate, and D1 boot regression remain unchanged by this
 investigation.
+
+## Real public-API o65 closure feasibility
+
+This follow-on remains an experiment only: it does not alter the fixed
+installer, add a production o65 loader, install CIO OPEN/GET/PUT, or package a
+BASIC application.
+
+### Candidate and exact closure
+
+`resident_api_o65.c` invokes the real Atari archive's `fn_init`, `fn_open`,
+`fn_write`, `fn_read`, `fn_info`, and `fn_close`, and owns two handles plus two
+128-byte cache records.  It is linked directly with `ld65`'s checked-in
+`module.cfg`, `fujinet-nio-atari.lib`, and `atari.lib`, deliberately without
+`crt0`: a CIO-resident module is entered through a handler vector, not an XEX
+startup sequence.  The toolchain accepts that actual closure directly with no
+unresolved imports.
+
+| o65 allocation part | bytes | linked relative range |
+|---|---:|---:|
+| TEXT (CODE + RODATA) | 10,000 | `$0000-$270f` |
+| initialized DATA | 7 | `$2710-$2716` |
+| BSS | 2,047 | `$2717-$2f15` |
+| cc65 ZP | 26 | `$0000-$0019` before runtime ZP placement |
+| **initialized / resident allocation** | **10,007 / 12,054** | **`$0000-$2f15`** |
+
+This is 140 bytes below the earlier 12,194-byte link-only XEX measurement:
+the o65 candidate correctly omits XEX-only `crt0`/constructor scaffolding,
+not library state.  The seven initialized bytes are the `"atari\0"` platform
+name; there are no initialized pointer records.  Major retained code remains
+the real `fn_rw` (1,517), `fn_state` (1,485), `fn_open` (1,263),
+`fn_transport` (1,120), packet builders/parsers, and cc65 arithmetic/stack
+helpers.  The candidate's representative C object contributes 706 bytes.
+
+### Relocation audit and execution evidence
+
+`co65 --verbose --no-output` reports 2,433 text relocations, zero data
+relocations, zero imports, and zero emitted o65 exports.  The checked parser
+accepts exactly the relocation forms supported by cc65 `modload.s` and reports:
+
+| form / target segment | count |
+|---|---:|
+| low/text, low/data, low/BSS, low/ZP | 2, 1, 58, 1,461 |
+| high/text, high/data, high/BSS | 2, 1, 58 |
+| word/text, word/data, word/BSS | 490, 7, 353 |
+
+Thus the real code exercises code-to-code, code-to-data, BSS, and cc65 ZP
+fixups; its DATA has no relocation records.  The parser rejects undefined,
+segment-address, segment-only, unsupported segment IDs, malformed streams,
+and trailing unparsed export metadata.  Its deliberate `SEGADR` negative test
+proves that an unsupported relocation cannot silently become an address.
+
+`o65_api_runtime.txt` uses the exact one generated module as its source bytes,
+relocates it to `$2000` and `$5000` without rebuilding, and executes both
+copies in soft65c02.  A narrow SIOV interceptor at `$e459` validates device
+`$7f`, W/P/R order, DCB direction, count and AUX; it returns literal checked
+FujiBus replies only.  Each real copy completes `fn_init/open/write/read/info/
+close`, emits five W/P/R triplets, parses handle `$1234`, accepts/writes four
+bytes, reads `R65!`, parses HTTP 200 and content length four, and retains its
+own mutable BSS result.  This is executable 6502 evidence for the actual
+library and transport, not a C/Python reimplementation of its public API.
+
+The o65 header does not emit public export names for this link despite the
+ld65 map labels.  That is a viable, explicit constraint: the production
+payload needs a small versioned header/jump table at the start of TEXT (or an
+equivalent generated entry-offset record); it must not depend on a host map.
+
+### Resident invocation contract
+
+The experiment makes the omitted startup work visible.  Before every later
+foreground CIO invocation, the resident assembly gateway must:
+
+1. Serialize entry with a resident busy latch; no `fn_*` call is legal from
+   an interrupt or concurrently re-entered CIO path.
+2. Save the 26-byte cc65 ZP bank at its chosen live placement, establish the
+   resident-owned cc65 software-stack pointer (`c_sp`), and preserve the 6502
+   hardware stack/CIO ABI frame.
+3. Call the resident C entry.  The loader—not `crt0`—must have copied DATA,
+   zeroed the 2,047-byte BSS, installed the fixed ZP placement, and performed
+   the one-time `fn_init()` before HATABS publication.
+4. Restore the caller's ZP/CPU-facing state before returning Y/A as required
+   by CIO.  This prevents a later BASIC/DOS program from inheriting cc65
+   scratch state while preserving the module's relocated BSS/library state.
+
+The runtime test explicitly clears the ZP bank and establishes `c_sp=$9000`
+for each base before entering the C function; it sets the hardware stack to
+`$ff`.  That proves the required inputs, not that arbitrary BASIC/OS state is
+already preserved by the current scaffold.  The permanent resident allocation
+must additionally include a bounded cc65 software stack; the o65 header's
+zero stack request means the loader must choose and reserve it explicitly.
+
+### Staging/result-window conclusion
+
+The parameterized allocation gate now uses the actual o65 sizes: with live
+`MEMLO=$0700`, current result end `$0b28`, transient bootstrap `$5600`, staging
+`$5800`, and observed stack floor `$941f`, it computes target
+`$0b28-$3a3d` and staged initialized bytes ending `$7f16`.  One-byte target /
+bootstrap and staging / stack overruns fail the gate.  The future installer
+must obtain all of those bounds at runtime and perform its existing HATABS
+ownership check before writing either target memory or raising MEMLO; the
+accepted live `resident-overlap` second-XEX test remains the evidence that
+MyPicoDOS otherwise ignores MEMLO.
+
+`$0b00-$0b27` should remain an **installer-transient** diagnostic ABI only,
+not a permanent resident hole.  The maintainable approach is for the
+transient loader to write it before/after installation, place the payload at
+`align(max(MEMLO, $0b28))`, then let ordinary allocation own the entire range
+from old MEMLO through the resident stack.  A later guest inspection can use
+the handler's versioned query/status entry or a separate transient probe;
+neither requires reserving `$0b00` after installation.
+
+**Conclusion: o65 is viable with specific constraints.**  The actual library
+closure has only relocation forms handled by the supported cc65 model and runs
+unchanged at two bases.  The remaining implementation work is deliberately
+bounded: a fixed-stage, explicit-arena o65 loader; a versioned module entry
+header; one-time DATA/BSS/ZP/stack initialization; and a save/restore CIO
+gateway.  `load/run` remains useful for transient staging, but cannot replace
+that runtime relocation step.
+
+### Verification retained for this increment
+
+The focused experiment gate passes with `make -C
+integration-tests/atari-sio/resident-relocation o65-api-closure o65-api-runtime
+allocation-plan allocation-plan-o65`; its soft65c02 run has 27 assertions for
+the two independently relocated copies.  The complete Atari integration test
+discovery (`65` tests) and `repos/fujinet-nio-lib` `make check` also pass.
+
+No production resident, public-library, endpoint, or boot code changed in
+this increment.  The existing live gates therefore retain their current
+evidence: resident installer `RPR!` at
+`test-evidence/atari-sio-resident-installer-20261024-194913/`, public API
+acceptance `ADP!` at
+`test-evidence/atari-sio-public-api-clock-20261024-195015/`, and D1 boot
+`NIO!` at `test-evidence/atari-sio-boot-20261024-195026/`.

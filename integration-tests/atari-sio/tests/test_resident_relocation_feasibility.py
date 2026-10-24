@@ -34,3 +34,10 @@ class ResidentRelocationFeasibilityTests(unittest.TestCase):
              "allocation-plan"],
             check=True,
         )
+
+    def test_real_public_api_o65_closure_relocates_and_executes_at_two_bases(self):
+        subprocess.run(
+            ["make", "-C", str(ROOT / "integration-tests/atari-sio/resident-relocation"),
+             "o65-api-closure", "o65-api-runtime"],
+            check=True,
+        )
