@@ -61,7 +61,7 @@ find_n:
         inx
         inx
         inx
-        cpx #35
+        cpx #33
         bne find_n
         bne fail
 found_n:

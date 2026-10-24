@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
 RESIDENT_INSTALL_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-install.atr"
 RESIDENT_FOREIGN_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-foreign.atr"
+RESIDENT_OWN_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-own.atr"
+RESIDENT_OVERLAP_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-overlap.atr"
+RESIDENT_APP = ROOT / "repos/nio-core-apps/build/atari/bin/fnresident.xex"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
@@ -60,6 +63,9 @@ PUBLIC_API_HEARTBEAT = PUBLIC_API_RESULT + 16
 PUBLIC_API_CLOCK_BYTES = bytes.fromhex('08 07 06 05 04 03 02 01')
 PUBLIC_API_CAPABILITY_REPLY = bytes((1, 0, 2, 0))
 PUBLIC_API_PROC_NOT_ADVERTISED = 1
+HATABS_ADDR = 0x031a
+HATABS_ENTRY_BYTES = 33
+HATABS_TOTAL_BYTES = 35
 PUBLIC_API_FILE_WRITE_STATUS = PUBLIC_API_RESULT + 18
 PUBLIC_API_FILE_WRITE_DEVICE_STATUS = PUBLIC_API_RESULT + 19
 PUBLIC_API_FILE_WRITE_RESPONSE_LENGTH = PUBLIC_API_RESULT + 20
@@ -1403,6 +1409,28 @@ def cleanup_temps(temps):
 def _u16(raw, offset):
     return raw[offset] | (raw[offset + 1] << 8)
 
+def _xex_bytes_at(path, address, length):
+    """Read literal bytes from a linked XEX without treating it as evidence."""
+    raw = path.read_bytes()
+    pos = 0
+    while pos < len(raw):
+        if raw[pos:pos + 2] == b'\xff\xff':
+            pos += 2
+            continue
+        if pos + 4 > len(raw):
+            break
+        start = raw[pos] | raw[pos + 1] << 8
+        end = raw[pos + 2] | raw[pos + 3] << 8
+        pos += 4
+        size = end - start + 1
+        if end < start or pos + size > len(raw):
+            raise RuntimeError(f'malformed XEX segment in {path}')
+        if start <= address and address + length - 1 <= end:
+            offset = address - start
+            return raw[pos + offset:pos + offset + length]
+        pos += size
+    raise RuntimeError(f'{path} has no bytes at ${address:04X}')
+
 def inspect_resident_installer(token, evidence_dir):
     """Inspect the installer and separately loaded probe in live Atari RAM."""
     sys.path[:0] = [str(SDK)]
@@ -1410,12 +1438,15 @@ def inspect_resident_installer(token, evidence_dir):
     with AltirraBridge.from_token_file(token) as bridge:
         install = bridge.peek(0x0b00, 40)
         probe = bridge.peek(0x0b40, 8)
-        hatabs = bridge.peek(0x031a, 35)
+        hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
         memlo = bridge.peek16(0x02e7)
+        resident_head = bridge.peek(0x1d00, 8)
+        staged_head = bridge.peek(0x5000, 8)
         screenshot = bridge.screenshot()
     (evidence_dir / 'resident-installation.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'probe_raw': probe.hex(),
         'hatabs_raw': hatabs.hex(), 'memlo': memlo,
+        'resident_head': resident_head.hex(), 'staged_head': staged_head.hex(),
     }, indent=2) + '\n')
     (evidence_dir / 'resident-screen.png').write_bytes(screenshot)
     if install[:4] != b'NRI!' or install[4] != 1:
@@ -1432,8 +1463,10 @@ def inspect_resident_installer(token, evidence_dir):
     if not (resident_start < resident_end <= stack_floor <= memtop < sdlstl <= savmsc):
         raise RuntimeError('resident range does not satisfy runtime memory bounds')
     offset = install[24]
-    if offset >= 35 or hatabs[offset] != ord('N'):
+    if offset >= HATABS_ENTRY_BYTES or hatabs[offset] != ord('N'):
         raise RuntimeError('resident N: HATABS entry is stale')
+    if hatabs[HATABS_ENTRY_BYTES:HATABS_TOTAL_BYTES] != b'\x00\x00':
+        raise RuntimeError('resident N: HATABS terminator was not preserved')
     table = _u16(install, 26)
     if _u16(hatabs, offset + 1) != table:
         raise RuntimeError('resident N: HATABS table pointer changed')
@@ -1461,7 +1494,7 @@ def inspect_resident_foreign(token, evidence_dir):
     from altirra_bridge import AltirraBridge
     with AltirraBridge.from_token_file(token) as bridge:
         install = bridge.peek(0x0b00, 32)
-        hatabs = bridge.peek(0x031a, 35)
+        hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
         memlo = bridge.peek16(0x02e7)
     (evidence_dir / 'resident-foreign.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'hatabs_raw': hatabs.hex(), 'memlo': memlo,
@@ -1472,6 +1505,8 @@ def inspect_resident_foreign(token, evidence_dir):
         raise RuntimeError('failed foreign install changed MEMLO')
     if hatabs[0:3] != bytes((ord('N'), 0x00, 0xd0)):
         raise RuntimeError('failed foreign install changed HATABS')
+    if hatabs[HATABS_ENTRY_BYTES:HATABS_TOTAL_BYTES] != b'\x00\x00':
+        raise RuntimeError('failed foreign install changed HATABS termination')
     return {'signature': 'NRF!', 'old_memlo': memlo, 'outcome': install[5]}
 
 def run_resident_foreign(timeout, evidence_dir):
@@ -1479,6 +1514,75 @@ def run_resident_foreign(timeout, evidence_dir):
         raise RuntimeError(f'resident foreign ATR is missing: {RESIDENT_FOREIGN_ATR}')
     return run_netsio(timeout, evidence_dir=evidence_dir, explicit_cold_reset=True,
                       boot_atr=RESIDENT_FOREIGN_ATR, inspector=inspect_resident_foreign)
+
+def inspect_resident_owned(token, evidence_dir):
+    """A preloaded genuine NIO table must make installer a no-op."""
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    with AltirraBridge.from_token_file(token) as bridge:
+        install = bridge.peek(0x0b00, 40)
+        hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
+        memlo = bridge.peek16(0x02e7)
+    (evidence_dir / 'resident-owned.json').write_text(json.dumps({
+        'installer_raw': install.hex(), 'hatabs_raw': hatabs.hex(), 'memlo': memlo,
+    }, indent=2) + '\n')
+    if install[:4] != b'NRI!' or install[5] != 1 or install[6] != 0xff:
+        raise RuntimeError('owned N: reinstall was not a pre-init no-op')
+    if memlo != _u16(install, 8) or _u16(install, 10) != _u16(install, 8):
+        raise RuntimeError('owned N: reinstall changed MEMLO')
+    offset, table = install[24], _u16(install, 26)
+    if offset >= HATABS_ENTRY_BYTES or hatabs[offset] != ord('N'):
+        raise RuntimeError('owned N: entry was not retained')
+    if _u16(hatabs, offset + 1) != table:
+        raise RuntimeError('owned N: table was replaced')
+    if hatabs[HATABS_ENTRY_BYTES:HATABS_TOTAL_BYTES] != b'\x00\x00':
+        raise RuntimeError('owned N: changed the HATABS terminator')
+    return {'signature': 'NRO!', 'old_memlo': memlo, 'outcome': install[5],
+            'handler_table': table}
+
+def run_resident_owned(timeout, evidence_dir):
+    if not RESIDENT_OWN_ATR.is_file():
+        raise RuntimeError(f'resident owned ATR is missing: {RESIDENT_OWN_ATR}')
+    return run_netsio(timeout, evidence_dir=evidence_dir, explicit_cold_reset=True,
+                      boot_atr=RESIDENT_OWN_ATR, inspector=inspect_resident_owned)
+
+def inspect_resident_overlap(token, evidence_dir):
+    """The DOS loader must not overwrite an image below its raised MEMLO."""
+    expected = _xex_bytes_at(RESIDENT_APP, 0x1d00, 4)
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    with AltirraBridge.from_token_file(token) as bridge:
+        install = bridge.peek(0x0b00, 40)
+        hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
+        memlo = bridge.peek16(0x02e7)
+        resident_head = bridge.peek(0x1d00, 4)
+        table_head = bridge.peek16(_u16(install, 26))
+    (evidence_dir / 'resident-overlap.json').write_text(json.dumps({
+        'installer_raw': install.hex(), 'hatabs_raw': hatabs.hex(), 'memlo': memlo,
+        'resident_head': resident_head.hex(), 'expected_head': expected.hex(),
+        'handler_table_head': table_head,
+    }, indent=2) + '\n')
+    if install[:4] != b'NRI!' or install[5] != 1 or install[6] != 0xff:
+        raise RuntimeError('second staged install was not an ownership no-op')
+    if memlo != _u16(install, 8) or _u16(install, 10) != _u16(install, 8):
+        raise RuntimeError('second staged install changed MEMLO')
+    offset, table = install[24], _u16(install, 26)
+    if offset >= HATABS_ENTRY_BYTES or hatabs[offset] != ord('N'):
+        raise RuntimeError('overlap load invalidated N: HATABS ownership')
+    if _u16(hatabs, offset + 1) != table or table_head != _u16(install, 28):
+        raise RuntimeError('overlap load changed resident handler data')
+    if hatabs[HATABS_ENTRY_BYTES:HATABS_TOTAL_BYTES] != b'\x00\x00':
+        raise RuntimeError('overlap load changed HATABS termination')
+    if resident_head != expected:
+        raise RuntimeError('DOS overlap segment overwrote resident image')
+    return {'signature': 'NROV!', 'outcome': install[5], 'new_memlo': memlo,
+            'resident_head': resident_head.hex(), 'handler_table': table}
+
+def run_resident_overlap(timeout, evidence_dir):
+    if not RESIDENT_OVERLAP_ATR.is_file():
+        raise RuntimeError(f'resident overlap ATR is missing: {RESIDENT_OVERLAP_ATR}')
+    return run_netsio(timeout, evidence_dir=evidence_dir, explicit_cold_reset=True,
+                      boot_atr=RESIDENT_OVERLAP_ATR, inspector=inspect_resident_overlap)
 
 def run_native(timeout, evidence_dir=None, observe=False):
     before=set(Path('/tmp').glob('altirra-bridge-*.token')); cmd,env,temps=altirra_command(True)

@@ -84,9 +84,8 @@ emulator runner, or treat virtual results as physical-SIO proof.
 
 - `repos/nio-core-apps` now builds `fnresident.xex` as a dedicated `$1d00`
   image with the real Atari archive and an explicit resident linker map.  The
-  image reserves every linked CODE/RODATA/DATA/BSS byte through MEMLO; the
-  current measured range is `$1d00-$2eca`, below the live `$941f` cc65-stack
-  floor and the Graphics-0 display allocation.
+  current linked range is `$1d00-$2ec6` (4,550 bytes, including library state
+  and BSS), below the live `$941f` cc65-stack floor and Graphics-0 display.
 - The installer calls `fn_init()` before changing HATABS, checks an existing
   `N:` entry by its table pointer, never replaces a foreign entry, and publishes
   MEMLO before the three-byte HATABS entry.  Its six address-minus-one vectors
@@ -107,6 +106,61 @@ emulator runner, or treat virtual results as physical-SIO proof.
   proves the installer reports the foreign outcome while retaining MEMLO
   `$0700` and the exact foreign HATABS bytes; evidence is
   `test-evidence/atari-sio-resident-foreign-live/netsio/resident-foreign.json`.
+
+## Lifecycle hardening evidence
+
+- The target profile is XL/XE. Checked-in cc65 layout gives eleven legal
+  three-byte HATABS entries at `$031a-$033a`; `$033b/$033c` are the required
+  zero terminator and `$033d+` are PUP validation bytes. The installer scans
+  only those eleven entries, stops at the first terminator, and the runtime
+  inspectors reject a changed terminator. It never scans or writes PUP bytes.
+- The current linked resident image is `$1d00-$2ec6` (4,550 bytes). Raising
+  live MEMLO from `$0700` to `$2ec6` reserves 10,182 bytes: the image plus the
+  intentionally protected 5,632-byte `$0700-$1cff` load-address gap. The map
+  and runtime gates quantify and verify this; no speculative relocation of
+  the resident image was performed.
+- A negative live experiment showed MyPicoDOS will copy an explicit XEX
+  segment without consulting MEMLO. The shipped installer therefore stages
+  its initialized `$1d00` image at `$5000-$5aee` and runs a small `$3800`
+  bootstrap. The bootstrap checks HATABS first and copies/clears BSS into the
+  protected range only when N: is absent. Its bounds are generated from the
+  actual linker map. This is an independently designed NIO lifecycle shim,
+  not legacy-handler code.
+- The executable `resident-overlap` fixture performs two genuine MyPicoDOS
+  loader phases. The second stages a fresh installer image but has no `$1d00`
+  segment; it sees the active N:, returns outcome 1 with `init_status=$ff`,
+  leaves MEMLO `$2ec6`, HATABS/terminator, table, and resident bytes unchanged.
+  Evidence: `test-evidence/atari-sio-resident-reinstall-bootstrap-live-3/netsio/resident-overlap.json`.
+  The separate owned-entry and foreign-entry live gates are retained at
+  `test-evidence/atari-sio-resident-owned-live-final/netsio/resident-owned.json`
+  and
+  `test-evidence/atari-sio-resident-foreign-bootstrap-final/netsio/resident-foreign.json`.
+- The current post-install proof is a real separately loaded `$4000` XEX which
+  validates retained bytes, vectors, and an OPEN-stub call. A reproducible
+  tokenized BASIC load is not yet available, so this increment explicitly does
+  not claim BASIC-load survival. It remains the later packaging increment.
+  Cold reset begins a new explicit installation lifecycle: no DOSINI hook is
+  needed for the approved in-session DOS/XEX-load contract.
+
+## Legacy NDEV behavioural comparison
+
+The original FujiNet NDEV source was reviewed at
+`https://github.com/FujiNetWIFI/fujinet-nhandler` as a behavioural coverage
+reference only. No NDEV code, relocation routine, CIO implementation, SIO
+command, or unit/session scheme was copied, translated, or adapted.
+
+- NDEV illustrates relevant Atari-facing concerns—address-minus-one vectors,
+  HATABS installation, resident lifetime, and DOSINI/reset reinsertion—and
+  historical risks such as replacing any matching N: entry.
+- NIO independently supplies the selected parity: bounded HATABS ownership,
+  foreign-entry rejection, protected resident bytes, own-entry idempotence,
+  and executable second-XEX survival. It intentionally does not use NDEV's
+  legacy `$71-$78` SIO path, unit-based sessions, or reset hook; later CIO
+  operations will use public `fn_*` APIs and native `$7f` only.
+- NDEV's DOSINI behaviour is deliberately not parity-required. The approved
+  NIO lifecycle is explicit reinstall after reset and persistence through
+  supported same-session program loads. The missing BASIC fixture is recorded
+  above as a real deferred gap, not a pass.
 
 ## Code Map
 
