@@ -30,7 +30,7 @@ RESIDENT_O65_OVERLAP_ATR := $(OUT)/fnresident-o65-overlap.atr
 RESIDENT_O65_FOREIGN_XEX := $(OUT)/fnresident-o65-foreign.xex
 RESIDENT_O65_FOREIGN_ATR := $(OUT)/fnresident-o65-foreign.atr
 
-.PHONY: all resident resident-foreign resident-own resident-overlap resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign test-resident-o65 clean
+.PHONY: all resident resident-foreign resident-own resident-overlap resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign resident-o65-footprint test-resident-o65 clean
 all: $(ATR)
 resident: $(RESIDENT_ATR)
 resident-foreign: $(RESIDENT_FOREIGN_ATR)
@@ -40,6 +40,12 @@ resident-o65: $(RESIDENT_O65_ATR)
 resident-o65-altbase: $(RESIDENT_O65_ALTBASE_ATR)
 resident-o65-overlap: $(RESIDENT_O65_OVERLAP_ATR)
 resident-o65-foreign: $(RESIDENT_O65_FOREIGN_ATR)
+
+# The N: payload uses URI-based fn_open(), not the optional TCP formatter.
+# Keep its module excluded and retain the measured bounded buffers: two shared
+# 512-byte packet workspaces and no second Atari recovery discard workspace.
+resident-o65-footprint: $(RESIDENT_O65_MODULE)
+	python3 ../resident-relocation/resident_footprint_report.py --map $(RESIDENT_O65_MODULE:.o65=.map) --max-initialized 9231 --max-bss 1387 --forbid-module fn_tcp_open.o
 
 $(OUT):
 	mkdir -p $@
@@ -152,7 +158,7 @@ $(RESIDENT_O65_FOREIGN_ATR): $(RESIDENT_O65_FOREIGN_XEX) $(PICOBOOT) Makefile | 
 	cp $(RESIDENT_O65_FOREIGN_XEX) $(OUT)/resident-o65-foreign-stage/coltest.xex
 	cd $(APPS) && dir2atr -m -D -B $(PICOBOOT) $(abspath $@) $(abspath $(OUT)/resident-o65-foreign-stage)
 
-test-resident-o65: resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign
+test-resident-o65: resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign resident-o65-footprint
 	cl65 -t none -C fnresident-o65-direct-control.cfg -o $(OUT)/fnresident-o65-direct-control.bin fnresident_o65_direct_control.s
 	cl65 -t none -C fnresident-o65-loader-control.cfg -o $(OUT)/fnresident-o65-loader-control.bin fnresident_o65_loader_control.s
 	cl65 -t none -C fnresident-o65-loader-siov.cfg -o $(OUT)/fnresident-o65-loader-siov.xex fnresident_o65_loader_siov.s

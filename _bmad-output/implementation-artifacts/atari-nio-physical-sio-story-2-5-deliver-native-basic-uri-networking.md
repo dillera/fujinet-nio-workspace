@@ -626,3 +626,87 @@ The fixed `$1d00` installer and its independent lifecycle regressions remain
 in place as reference coverage.  The next increment may add CIO operations,
 but must retain this bounded loader, transient-result discipline, and the
 two-base/ownership gates.
+
+## Resident public-library footprint reduction
+
+This bounded optimization retained the same public API closure, o65 format,
+two-base relocation and handler lifecycle.  It did not add a CIO operation or
+change the native transport contract.
+
+### Measured production module
+
+`resident-o65-footprint` parses the actual production
+`fnresident-module.map`, ranks every CODE/RODATA/DATA/BSS contributor, and
+fails if the bounded N: closure exceeds its recorded post-change allocation or
+links the optional TCP formatter.  The post-change module is:
+
+| segment | bytes | largest contributors |
+|---|---:|---|
+| CODE | 9,158 | `fn_rw` 1,505; `fn_packet_build_rw` 927; `fn_packet_build_open` 734; `fn_open` 726; `fn_transport` 585 |
+| RODATA | 66 | module URI 30; handler table 20; response parser 16 |
+| DATA | 7 | transport platform name 6; state 1 |
+| BSS | 1,387 | `fn_state` 1,089; resident IOCB handles/caches 269; transport state 17; `fn_rw` diagnostics 12 |
+| cc65 ZP / C stack | 26 / 256 | established resident ABI requirements |
+
+The 1,089-byte `fn_state` allocation is the necessary pair of bounded
+512-byte raw FujiBus request/reply buffers plus session and parser context.
+The module's 269 bytes are the deliberate two 128-byte CIO caches, two
+handles and small per-handler state.  These are not duplicate packet copies.
+The remaining major code is required to build/parse public Open, Read, Write,
+Info and Close packets; no low-risk removal was found there without removing
+an approved future N: operation.
+
+| measurement | before | after | change |
+|---|---:|---:|---:|
+| initialized CODE+RODATA+DATA | 9,923 | 9,231 | -692 |
+| BSS | 2,027 | 1,387 | -640 |
+| payload allocation | 11,950 | 10,618 | -1,332 |
+| payload plus 256-byte C stack | 12,206 | 10,874 | -1,332 |
+| live `$0700` reservation / new MEMLO | `$0700-$36ad` / `$36ae` | `$0700-$3179` / `$317a` | 1,332 bytes reclaimed |
+
+The FNR1 wrapped stage is now 13,903 bytes at `$5800-$8e4e`; its o65 module
+contains 9,231 initialized bytes, 1,387 BSS bytes and the unchanged 26-byte
+cc65 ZP requirement.  The transient loader segment is 1,951 bytes at
+`$3800-$3f9e` (1,957 bytes in its XEX record), and the resident C stack is
+still the explicit 256-byte allocation included in the permanent reservation.
+Neither transient artifact is retained after installation.  The loader's
+staging and stack/display checks therefore remain parameterized rather than
+relying on the former larger footprint.
+
+### Changes and regression evidence
+
+- `fn_tcp_open()` was split into its own archive member with its private
+  128-byte TCP URL formatter.  URI-based N: code calls `fn_open()` and no
+  longer links that optional member, its decimal conversion helpers or its
+  scratch storage.  The exported function and its existing TCP wire method
+  are unchanged; `open_wire_test` now asserts its exact generated Open packet.
+- Atari recovery now drains a retained response into the existing internal
+  bounded reply buffer before a new application W.  It previously retained a
+  second, independent 512-byte discard buffer.  The operation occurs only
+  while an outstanding response is being intentionally retired, so it cannot
+  overrun caller storage or alter the retained-response recovery contract.
+  The real assembled soft65c02 transport suite continues to cover timeout,
+  malformed P, interrupted R, reset and 512-byte recovery ordering.
+- The smaller allocation exposed a carry-loss bug in the production o65
+  loader's `initialized + BSS` validation: the former low-byte comparison
+  happened to restore the needed carry.  The loader now preserves that carry
+  explicitly, and its assembly test proves copied/relocated `fn_init`, BSS
+  initialization, MEMLO publication and failure rollback with the new image.
+
+Executed focused gates: `test-open-wire`, `test-atari-transport`,
+`resident-o65-footprint`, `test-resident-o65`, and the existing real-library
+two-base `o65-api-closure o65-api-runtime` test.  `make -C
+repos/fujinet-nio-lib check` passed across its configured cc65, hosted,
+MS-DOS and Amiga targets.
+
+Fresh live evidence is retained at:
+
+- `test-evidence/atari-sio-resident-o65-installer-20261024-214621/` —
+  production NetSIO installation result `RPR!`, live `MEMLO=$317a`, retained
+  relocated head `4c921a201028a90f`, and a separate post-install probe call.
+- `test-evidence/atari-sio-public-api-clock-20261024-214706/` — normal
+  public API acceptance result `ADP!`, all Clock/File/Network/Disk stages and
+  backing effects intact after rebuilding against the smaller archive.
+- `test-evidence/atari-sio-boot-20261024-214919/` — the deterministic D1
+  regression reached `NIO!` through both the native control and production
+  NetSIO path; its D1 service counters and first-read traffic remain present.
