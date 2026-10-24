@@ -33,28 +33,40 @@ _main:
         cpx #2
         jeq r_open
         cpx #3
-        jeq w_read
+        jeq w_info
         cpx #4
-        jeq p_read
+        jeq p_info
         cpx #5
-        jeq r_read
+        jeq r_info
         cpx #6
-        jeq w_close
+        jeq w_read
         cpx #7
-        jeq p_close
+        jeq p_read
         cpx #8
-        jeq r_close
+        jeq r_read
         cpx #9
-        jeq w_open_b
+        jeq w_info
         cpx #10
-        jeq p_open
+        jeq p_info
         cpx #11
-        jeq r_open
+        jeq r_info
         cpx #12
         jeq w_close
         cpx #13
         jeq p_close
         cpx #14
+        jeq r_close
+        cpx #15
+        jeq w_open_b
+        cpx #16
+        jeq p_open
+        cpx #17
+        jeq r_open
+        cpx #18
+        jeq w_close
+        cpx #19
+        jeq p_close
+        cpx #20
         jeq r_close
         jmp bad
 
@@ -82,6 +94,14 @@ w_read:
         jcs bad
         inc step
         jmp ok
+w_info:
+        ldx #<packet_info
+        ldy #>packet_info
+        lda #9
+        jsr check_w_packet
+        jcs bad
+        inc step
+        jmp ok
 w_close:
         ldx #<packet_close
         ldy #>packet_close
@@ -94,6 +114,8 @@ w_close:
 p_open: ldx #13
         jmp send_p
 p_read: ldx #20
+        jmp send_p
+p_info: ldx #6
         jmp send_p
 p_close:ldx #6
 send_p:
@@ -134,6 +156,10 @@ r_open: lda #13
 r_read: lda #20
         ldx #<reply_read
         ldy #>reply_read
+        jmp send_r
+r_info: lda #6
+        ldx #<reply_info
+        ldy #>reply_info
         jmp send_r
 r_close:lda #6
         ldx #<reply_close
@@ -279,11 +305,15 @@ packet_open_b:
         .byte "fixture://b",0,0,0,0,0,0,0,0
 packet_read:
         .byte $fd,3,15,0,$d7,0,1,$34,$12,0,0,0,0,$80,0
+packet_info:
+        .byte $fd,5,9,0,$53,0,1,$34,$12
 packet_close:
         .byte $fd,4,9,0,$52,0,1,$34,$12
 reply_open:
         .byte $fd,1,13,0,$53,0,1,0,0,0,$34,$12,0
 reply_read:
         .byte $fd,3,20,0,$03,0,1,1,0,0,$34,$12,0,0,0,0,2,0,'Q','R'
+reply_info:
+        .byte $fd,5,6,0,$09,0
 reply_close:
         .byte $fd,4,6,0,$08,0

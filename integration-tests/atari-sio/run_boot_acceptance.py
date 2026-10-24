@@ -1499,8 +1499,8 @@ def inspect_resident_o65_installer(token, evidence_dir, expected_outcome=0,
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
     with AltirraBridge.from_token_file(token) as bridge:
-        install = bridge.peek(0x9000, 40)
-        probe = bridge.peek(0x5440, 19)
+        install = bridge.peek(0x9380, 40)
+        probe = bridge.peek(0x5440, 16)
         hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
         memlo = bridge.peek16(0x02e7)
         resident_start, resident_end = _u16(install, 12), _u16(install, 14)
@@ -1509,6 +1509,7 @@ def inspect_resident_o65_installer(token, evidence_dir, expected_outcome=0,
         screenshot = bridge.screenshot()
     (evidence_dir / 'resident-o65-installation.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'probe_raw': probe.hex(),
+        'stage_head': stage_head.hex(),
         'hatabs_raw': hatabs.hex(), 'memlo': memlo,
         'resident_head': resident_head.hex(), 'staged_head': stage_head.hex(),
     }, indent=2) + '\n')
@@ -1543,9 +1544,9 @@ def inspect_resident_o65_installer(token, evidence_dir, expected_outcome=0,
         raise RuntimeError('idempotent install changed or lost its original resident range')
     memtop, stack_floor = _u16(install, 16), _u16(install, 18)
     sdlstl, savmsc = _u16(install, 20), _u16(install, 22)
-    if not (resident_start < resident_end <= 0x3d00 <= stack_floor <= memtop < sdlstl <= savmsc):
+    if not (resident_start < resident_end <= 0x3f00 <= stack_floor <= memtop < sdlstl <= savmsc):
         raise RuntimeError('o65 resident range violates loader/stack/display bounds')
-    if resident_start <= 0x9000 < resident_end:
+    if resident_start <= 0x9380 < resident_end:
         raise RuntimeError('transient result window was retained in resident allocation')
     offset = install[24]
     if offset >= HATABS_ENTRY_BYTES or hatabs[offset] != ord('N'):
@@ -1587,22 +1588,26 @@ def inspect_resident_o65_open(token, evidence_dir):
     sys.path[:0] = [str(SDK)]
     from altirra_bridge import AltirraBridge
     with AltirraBridge.from_token_file(token) as bridge:
-        install = bridge.peek(0x9000, 40)
-        probe = bridge.peek(0x5440, 19)
+        install = bridge.peek(0x9380, 40)
+        # The bridge caps a direct memory reply at 21 bytes.
+        probe = bridge.peek(0x5440, 21) + bridge.peek(0x5455, 2)
+        stage_head = bridge.peek(0x4900, 8)
         screenshot = bridge.screenshot()
     (evidence_dir / 'resident-o65-open.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'probe_raw': probe.hex(),
+        'stage_head': stage_head.hex(),
     }, indent=2) + '\n')
     (evidence_dir / 'resident-o65-open-screen.png').write_bytes(screenshot)
     if install[:4] != b'NRI!' or install[5] != 0:
         raise RuntimeError('resident N: OPEN guest did not retain a successful installation')
-    if (probe[:5] != b'RPR!\x06' or probe[5] != 1 or probe[6] != 1 or
+    if (probe[:5] != b'RPR!\x08' or probe[5] != 1 or probe[6] != 1 or
             probe[7] != ord('N') or probe[8] != 1 or probe[9] != ord('E') or
             probe[10] != 1 or probe[11] != 1 or
             probe[12] != 1 or probe[13] != 1 or probe[14] != 1 or
             probe[15] != 1 or probe[16] != 1 or probe[17] != 1 or
-            probe[18] != 1):
-        raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT/CLOSE did not succeed: {probe.hex()}')
+            probe[18] != 1 or probe[19] != 1 or probe[20] != 1 or
+            probe[21] != 1 or probe[22] != 1):
+        raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT/STATUS/CLOSE did not succeed: {probe.hex()}')
     return {'signature': 'RPR!', 'version': probe[4], 'cio_open_status': probe[5],
             'cio_get_bytes': probe[7:10:2].decode('ascii'),
             'screenshot': str(evidence_dir / 'resident-o65-open-screen.png')}
@@ -1628,11 +1633,15 @@ def run_resident_o65_open(timeout, evidence_dir):
         inspector=inspect_resident_o65_open,
         program=ROOT / 'integration-tests/atari-sio/boot-app/build/fnresident-o65-open.xex')
     trace = (run / 'nio.log').read_text(errors='replace')
-    if trace.count('NetworkDevice routed request') != 13:
-        raise RuntimeError('resident CIOV OPEN/GET/CLOSE/PUT did not dispatch thirteen real NetworkDevice requests')
-    for command in (1, 2, 4, 1, 4, 1, 3, 3, 4, 1, 3, 3, 4):
-        if f'command={command}' not in trace:
-            raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT is missing NetworkDevice command={command}')
+    if trace.count('NetworkDevice routed request') != 17:
+        raise RuntimeError('resident CIOV OPEN/GET/CLOSE/PUT/STATUS did not dispatch seventeen real NetworkDevice requests')
+    expected_commands = (1, 2, 4, 1, 4, 1, 3, 3, 5, 5, 4, 1, 3, 3, 5, 5, 4)
+    observed_commands = tuple(
+        int(match.group(1))
+        for match in re.finditer(r'NetworkDevice routed request \d+ command=(\d+)', trace))
+    if observed_commands != expected_commands:
+        raise RuntimeError('resident CIOV OPEN/GET/CLOSE/PUT/STATUS command order is not exact: '
+                           f'{observed_commands!r}')
     if 'Resident N: fixture accepted GET open' not in trace:
         raise RuntimeError('resident CIOV OPEN did not reach the deterministic production protocol')
     if 'Resident N: fixture accepted PUT open' not in trace:
@@ -1659,7 +1668,7 @@ def run_resident_o65_open(timeout, evidence_dir):
                  if '[SIODATA]' in line]
         if lines:
             pokey.write_text('\n'.join(lines) + '\n')
-    result['network_dispatches'] = 13
+    result['network_dispatches'] = 17
     result['network_trace'] = str(run / 'nio.log')
     if pokey.is_file() and pokey.stat().st_size:
         result['pokey_trace'] = str(pokey)

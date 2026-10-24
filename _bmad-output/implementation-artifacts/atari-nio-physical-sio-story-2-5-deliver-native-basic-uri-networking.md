@@ -818,8 +818,8 @@ Executed evidence:
   payload write (`valid=1`) and no duplicate write.
 
 `PUTREC` is deliberately not used for this byte-oriented increment: the live
-caller uses the verified CIO `PUTCHR` command `$0b`. Unknown-length commitment,
-STATUS and BASIC acceptance remain out of scope.
+caller uses the verified CIO `PUTCHR` command `$0b`. At that intermediate
+checkpoint STATUS and BASIC acceptance remained out of scope.
 
 ## Increment: output CLOSE flush and commitment
 
@@ -850,3 +850,36 @@ Evidence:
   a 128-byte body and a distinct three-byte `BCD` body, logging exactly two
   commits (`offset=128` and `offset=3`) and 13 total ordered service
   dispatches without duplicate writes or commits.
+
+## Increment: resident CIO STATUS
+
+The relocated STATUS vector now enters the same foreground C gateway as the
+other public calls and uses `fn_info()` for every active session. An input
+session reports `SUCCES` while cached data remains; after an EOF-marked cache
+has been exhausted, it still completes the public INFO request but returns the
+named `EOFERR` CIO status. An output session uses the shared finalizer: its
+first STATUS flushes any partial cache, performs the one zero-length public
+`fn_write()` commitment, and then obtains INFO. `write_committed` makes later
+STATUS calls and CLOSE skip that commitment. A failed write or commit remains
+latched and is never replayed.
+
+The STATUS closure raises initialized resident content to 12,468 bytes (CODE
+12,425, RODATA 16, DATA 27), with 1,444 bytes of BSS, 26 bytes of cc65 ZP and
+the existing 256-byte resident C stack. The live `$0700` allocation now ends
+at `$3e58`, still below the transient loader at `$3f00`. To retain safe room
+for the larger o65 source, the transient probe/launcher/result layout is
+`$46a0`, `$48e0`, and `$9380`; the staged source is `$4900-$9290`, below the
+observed `$941f` stack floor. These are transient-only moves enforced by the
+existing range gates, not a resident footprint redesign.
+
+Evidence:
+
+- `make -C integration-tests/atari-sio/boot-app test-resident-o65` executes
+  production 6502 STATUS through HATABS. It observes a literal INFO W/P/R
+  exchange before the input cache is consumed and again after EOF, verifies
+  `EOFERR`, and proves caller A/X/ZP restoration.
+- `test-evidence/atari-sio-resident-o65-open-20261025-004014/netsio/` records
+  live `RPR!` v8. Its exact real-core command sequence has 17 dispatches:
+  each output body is written once, committed once, queried by two STATUS
+  calls, then closed. The fixture records only two commitments at offsets 128
+  and 3, so repeated STATUS and CLOSE cannot count as duplicate effects.

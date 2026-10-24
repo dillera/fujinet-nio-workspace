@@ -39,7 +39,7 @@ _main:
 
         ; Install the real production o65 payload through its transient
         ; loader before calling the published HATABS entry.
-        jsr $3d00
+        jsr $3f00
 
         ldx #0
 fill_zp:

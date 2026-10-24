@@ -32,7 +32,7 @@ _main:
         sta $0058
         lda #$9c
         sta $0059
-        jsr $3d00
+        jsr $3f00
 
         lda #<$0700
         sta actual+1

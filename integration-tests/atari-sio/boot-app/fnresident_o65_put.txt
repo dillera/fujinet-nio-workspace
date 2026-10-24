@@ -1,10 +1,10 @@
 memory flush
-memory load #0x4500 "build/fnresident-o65-put-control.bin"
+memory load #0x4700 "build/fnresident-o65-put-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-put-siov.xex"
 registers flush
-run #0x4500 until (#0x06d0 = 0x01 OR cycle_count > 0xd00000)
+run #0x4700 until (#0x06d0 = 0x01 OR cycle_count > 0xd00000)
 assert #0x06d0 = 0x01 $$resident CIO PUT control completed$$
 assert #0x06d1 = 0x01 $$output N1 OPEN succeeds through public fn_open$$
 assert #0x06d2 = 0x00 $$all 128 CIO PUT calls succeed$$

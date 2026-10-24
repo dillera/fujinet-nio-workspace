@@ -35,7 +35,7 @@ _main:
         lda #$9c
         sta $0059
 
-        jsr $3d00
+        jsr $3f00
         ldx #0
 fill_zp:
         txa
@@ -50,6 +50,13 @@ fill_zp:
         ldx #$20
         jsr call_open
         sty RESULT+1
+
+        lda #$4b
+        ldx #$20
+        jsr call_status
+        sta RESULT+17
+        stx RESULT+18
+        sty RESULT+19
 
         lda #$11
         ldx #$20
@@ -67,6 +74,12 @@ fill_zp:
         jsr call_get
         sta RESULT+7
         sty RESULT+6
+        lda #$3c
+        ldx #$20
+        jsr call_status
+        sta RESULT+20
+        stx RESULT+21
+        sty RESULT+22
         lda #$7c
         ldx #$20
         jsr call_close
@@ -112,6 +125,9 @@ call_open:
         jmp call_vector
 call_close:
         ldy #2
+        jmp call_vector
+call_status:
+        ldy #8
         jmp call_vector
 call_get:
         ldy #4

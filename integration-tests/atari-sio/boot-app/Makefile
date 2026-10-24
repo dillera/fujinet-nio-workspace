@@ -56,7 +56,7 @@ resident-o65-open: $(RESIDENT_O65_OPEN_ATR)
 # Keep its module excluded and retain the measured bounded buffers: two shared
 # 512-byte packet workspaces and no second Atari recovery discard workspace.
 resident-o65-footprint: $(RESIDENT_O65_MODULE)
-	python3 ../resident-relocation/resident_footprint_report.py --map $(RESIDENT_O65_MODULE:.o65=.map) --max-initialized 12100 --max-bss 1500 --forbid-module fn_tcp_open.o
+	python3 ../resident-relocation/resident_footprint_report.py --map $(RESIDENT_O65_MODULE:.o65=.map) --max-initialized 12600 --max-bss 1500 --forbid-module fn_tcp_open.o
 
 $(OUT):
 	mkdir -p $@
@@ -125,7 +125,7 @@ $(RESIDENT_O65_MODULE):
 	$(MAKE) -C $(APPS) -f makefiles/build.mk TARGET=atari fnresident-module
 
 $(RESIDENT_O65_STAGE): $(RESIDENT_O65_MODULE) $(RESIDENT_O65_LABELS) ../make_resident_o65_image.py Makefile | $(OUT)
-	python3 ../make_resident_o65_image.py --module $(RESIDENT_O65_MODULE) --labels $(RESIDENT_O65_LABELS) --stage 0x4900 --max-stage-end 0x9000 --output $@
+	python3 ../make_resident_o65_image.py --module $(RESIDENT_O65_MODULE) --labels $(RESIDENT_O65_LABELS) --stage 0x4900 --max-stage-end 0x9380 --output $@
 
 $(RESIDENT_O65_LOADER): $(APPS)/apps/platform/atari/resident/fnresident_o65_loader.s fnresident-o65-loader.cfg | $(OUT)
 	cl65 -t none -C fnresident-o65-loader.cfg -o $@ $(APPS)/apps/platform/atari/resident/fnresident_o65_loader.s

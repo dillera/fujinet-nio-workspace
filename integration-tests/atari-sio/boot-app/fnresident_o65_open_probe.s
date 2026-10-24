@@ -100,6 +100,19 @@ write_loop:
         lda IOCB+11,x
         cmp #128
         bne write_loop
+        ; STATUS commits the completed unknown-length output body once and
+        ; then obtains public session information. CLOSE must not commit it
+        ; again.
+        ldx #$20
+        lda #$0d
+        sta IOCB+2,x
+        jsr CIOV
+        sty write_status_status
+        ldx #$20
+        lda #$0d
+        sta IOCB+2,x
+        jsr CIOV
+        sty write_status_repeat_status
         ldx #$20
         lda #CLOSE
         sta IOCB+2,x
@@ -141,6 +154,16 @@ write_loop:
         jsr CIOV
         sty partial_put_status
         ldx #$20
+        lda #$0d
+        sta IOCB+2,x
+        jsr CIOV
+        sty partial_status_status
+        ldx #$20
+        lda #$0d
+        sta IOCB+2,x
+        jsr CIOV
+        sty partial_status_repeat_status
+        ldx #$20
         lda #CLOSE
         sta IOCB+2,x
         jsr CIOV
@@ -153,7 +176,7 @@ write_loop:
         sta RESULT+2
         lda #'!'
         sta RESULT+3
-        lda #6
+        lda #8
         sta RESULT+4
         lda open_status
         sta RESULT+5
@@ -183,6 +206,14 @@ write_loop:
         sta RESULT+17
         lda partial_close_status
         sta RESULT+18
+        lda write_status_status
+        sta RESULT+19
+        lda partial_status_status
+        sta RESULT+20
+        lda write_status_repeat_status
+        sta RESULT+21
+        lda partial_status_repeat_status
+        sta RESULT+22
 halt:   jmp halt
 
 uri:    .byte "N1:fixture://resident-open", 0
@@ -201,3 +232,7 @@ write_close_status: .byte 0
 partial_open_status: .byte 0
 partial_put_status: .byte 0
 partial_close_status: .byte 0
+write_status_status: .byte 0
+partial_status_status: .byte 0
+write_status_repeat_status: .byte 0
+partial_status_repeat_status: .byte 0
