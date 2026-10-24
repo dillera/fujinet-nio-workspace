@@ -13,7 +13,7 @@ import argparse
 from pathlib import Path
 
 RUNAD, INITAD = 0x02E0, 0x02E2
-LAUNCHER = 0x4400
+LAUNCHER = 0x4500
 
 
 def segments(blob: bytes):

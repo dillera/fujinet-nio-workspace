@@ -34,7 +34,7 @@ _main:
         sta $0058
         lda #$9c
         sta $0059
-        jsr $3c00
+        jsr $3d00
         ldx #0
 fill_zp:
         txa

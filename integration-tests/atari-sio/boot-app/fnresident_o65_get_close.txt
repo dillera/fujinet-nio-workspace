@@ -1,10 +1,10 @@
 memory flush
-memory load #0x4400 "build/fnresident-o65-get-close-control.bin"
+memory load #0x4500 "build/fnresident-o65-get-close-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-get-close-siov.xex"
 registers flush
-run #0x4400 until (#0x06a0 = 0x01 OR cycle_count > 0xb00000)
+run #0x4500 until (#0x06a0 = 0x01 OR cycle_count > 0xb00000)
 assert #0x06a0 = 0x01 $$resident CIO GET/CLOSE control completed$$
 assert #0x06a1 = 0x01 $$initial N1 OPEN succeeds through public fn_open$$
 assert #0x06a2 = 0x01 $$first GET succeeds through public fn_read$$

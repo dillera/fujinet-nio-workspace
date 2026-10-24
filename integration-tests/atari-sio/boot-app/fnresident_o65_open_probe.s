@@ -105,6 +105,46 @@ write_loop:
         sta IOCB+2,x
         jsr CIOV
         sty write_close_status
+
+        ; A second, short output session verifies that CLOSE flushes the
+        ; partial cache once and then sends the zero-length public commit.
+        ldx #$20
+        lda #OPEN
+        sta IOCB+2,x
+        lda #<write_uri
+        sta IOCB+4,x
+        lda #>write_uri
+        sta IOCB+5,x
+        lda #$08
+        sta IOCB+10,x
+        jsr CIOV
+        sty partial_open_status
+        lda #'B'
+        ldx #$20
+        lda #CIOPUT
+        sta IOCB+2,x
+        lda #'B'
+        jsr CIOV
+        sty partial_put_status
+        lda #'C'
+        ldx #$20
+        lda #CIOPUT
+        sta IOCB+2,x
+        lda #'C'
+        jsr CIOV
+        sty partial_put_status
+        lda #'D'
+        ldx #$20
+        lda #CIOPUT
+        sta IOCB+2,x
+        lda #'D'
+        jsr CIOV
+        sty partial_put_status
+        ldx #$20
+        lda #CLOSE
+        sta IOCB+2,x
+        jsr CIOV
+        sty partial_close_status
         lda #'R'
         sta RESULT
         lda #'P'
@@ -113,7 +153,7 @@ write_loop:
         sta RESULT+2
         lda #'!'
         sta RESULT+3
-        lda #5
+        lda #6
         sta RESULT+4
         lda open_status
         sta RESULT+5
@@ -137,6 +177,12 @@ write_loop:
         sta RESULT+14
         lda write_close_status
         sta RESULT+15
+        lda partial_open_status
+        sta RESULT+16
+        lda partial_put_status
+        sta RESULT+17
+        lda partial_close_status
+        sta RESULT+18
 halt:   jmp halt
 
 uri:    .byte "N1:fixture://resident-open", 0
@@ -152,3 +198,6 @@ close_2_status: .byte 0
 write_open_status: .byte 0
 write_put_status: .byte 0
 write_close_status: .byte 0
+partial_open_status: .byte 0
+partial_put_status: .byte 0
+partial_close_status: .byte 0

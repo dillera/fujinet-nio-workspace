@@ -791,9 +791,10 @@ The resident N: handler now accepts `OPNOT` output OPENs and maps them only to
 public `fn_open(..., FN_METHOD_PUT, ...)`. Each owned output IOCB uses its
 existing bounded 128-byte cache. `PUTCHR` accumulates bytes in order and makes
 exactly one public `fn_write()` call only when the cache is full; an uncertain
-write failure latches the slot instead of replaying it. CLOSE intentionally
-does not commit a partial cache: unknown-length POST/PUT commitment remains
-deferred. GET, CLOSE, STATUS and SPECIAL behavior is otherwise unchanged.
+write failure latches the slot instead of replaying it. At that intermediate
+PUT checkpoint CLOSE did not yet commit a partial cache; the following CLOSE
+increment supersedes that limitation. GET, CLOSE, STATUS and SPECIAL behavior
+was otherwise unchanged.
 
 The write closure raises the measured initialized resident image to 11,739
 bytes (CODE 11,696, RODATA 16, DATA 27), with 1,442 BSS bytes, 26 cc65 ZP
@@ -819,3 +820,33 @@ Executed evidence:
 `PUTREC` is deliberately not used for this byte-oriented increment: the live
 caller uses the verified CIO `PUTCHR` command `$0b`. Unknown-length commitment,
 STATUS and BASIC acceptance remain out of scope.
+
+## Increment: output CLOSE flush and commitment
+
+Output CLOSE now owns the complete unknown-length PUT termination sequence.
+It flushes a non-empty per-IOCB cache through the existing public `fn_write()`
+at the tracked write offset, then issues exactly one public zero-length
+`fn_write()` at the resulting offset to commit the body, and only then calls
+`fn_close()`. A full cache has already been written by PUT, so its CLOSE skips
+that body write and sends only the zero-length commit. Any failed body or
+commit exchange latches the owner, returns `DERROR`, retires the handle once,
+and never replays the uncertain body or commit.
+
+The small helper increased initialized resident content to 12,002 bytes
+(CODE 11,959, RODATA 16, DATA 27), with unchanged 1,442-byte BSS, 26-byte ZP
+and 256-byte C stack. The `$0700` reservation ends at `$3c84`; consequently
+the transient loader/probe/stage layout is now `$3d00`, `$4500/$4600`, and
+`$4900-$8fc9`, still below the `$9000` diagnostic window. The relocation and
+range gates are updated to reject overlap at these actual bounds.
+
+Evidence:
+
+- `make -C integration-tests/atari-sio/boot-app test-resident-o65` validates
+  the full-buffer case against production assembly: exactly one 128-byte
+  Write, one zero-length Commit and one Close (12 W/P/R calls), including
+  exact DCB direction/count/AUX and all body bytes.
+- `test-evidence/atari-sio-resident-o65-open-20261025-001017/netsio/` records
+  `RPR!` v6 from the live CIOV caller. The production NetworkDevice accepted
+  a 128-byte body and a distinct three-byte `BCD` body, logging exactly two
+  commits (`offset=128` and `offset=3`) and 13 total ordered service
+  dispatches without duplicate writes or commits.

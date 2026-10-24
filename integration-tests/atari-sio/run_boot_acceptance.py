@@ -1500,12 +1500,12 @@ def inspect_resident_o65_installer(token, evidence_dir, expected_outcome=0,
     from altirra_bridge import AltirraBridge
     with AltirraBridge.from_token_file(token) as bridge:
         install = bridge.peek(0x9000, 40)
-        probe = bridge.peek(0x5440, 16)
+        probe = bridge.peek(0x5440, 19)
         hatabs = bridge.peek(HATABS_ADDR, HATABS_TOTAL_BYTES)
         memlo = bridge.peek16(0x02e7)
         resident_start, resident_end = _u16(install, 12), _u16(install, 14)
         resident_head = bridge.peek(resident_start, 8)
-        stage_head = bridge.peek(0x4800, 8)
+        stage_head = bridge.peek(0x4900, 8)
         screenshot = bridge.screenshot()
     (evidence_dir / 'resident-o65-installation.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'probe_raw': probe.hex(),
@@ -1543,7 +1543,7 @@ def inspect_resident_o65_installer(token, evidence_dir, expected_outcome=0,
         raise RuntimeError('idempotent install changed or lost its original resident range')
     memtop, stack_floor = _u16(install, 16), _u16(install, 18)
     sdlstl, savmsc = _u16(install, 20), _u16(install, 22)
-    if not (resident_start < resident_end <= 0x3c00 <= stack_floor <= memtop < sdlstl <= savmsc):
+    if not (resident_start < resident_end <= 0x3d00 <= stack_floor <= memtop < sdlstl <= savmsc):
         raise RuntimeError('o65 resident range violates loader/stack/display bounds')
     if resident_start <= 0x9000 < resident_end:
         raise RuntimeError('transient result window was retained in resident allocation')
@@ -1588,7 +1588,7 @@ def inspect_resident_o65_open(token, evidence_dir):
     from altirra_bridge import AltirraBridge
     with AltirraBridge.from_token_file(token) as bridge:
         install = bridge.peek(0x9000, 40)
-        probe = bridge.peek(0x5440, 16)
+        probe = bridge.peek(0x5440, 19)
         screenshot = bridge.screenshot()
     (evidence_dir / 'resident-o65-open.json').write_text(json.dumps({
         'installer_raw': install.hex(), 'probe_raw': probe.hex(),
@@ -1596,12 +1596,13 @@ def inspect_resident_o65_open(token, evidence_dir):
     (evidence_dir / 'resident-o65-open-screen.png').write_bytes(screenshot)
     if install[:4] != b'NRI!' or install[5] != 0:
         raise RuntimeError('resident N: OPEN guest did not retain a successful installation')
-    if (probe[:5] != b'RPR!\x05' or probe[5] != 1 or probe[6] != 1 or
+    if (probe[:5] != b'RPR!\x06' or probe[5] != 1 or probe[6] != 1 or
             probe[7] != ord('N') or probe[8] != 1 or probe[9] != ord('E') or
             probe[10] != 1 or probe[11] != 1 or
             probe[12] != 1 or probe[13] != 1 or probe[14] != 1 or
-            probe[15] != 1):
-        raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT did not succeed: {probe.hex()}')
+            probe[15] != 1 or probe[16] != 1 or probe[17] != 1 or
+            probe[18] != 1):
+        raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT/CLOSE did not succeed: {probe.hex()}')
     return {'signature': 'RPR!', 'version': probe[4], 'cio_open_status': probe[5],
             'cio_get_bytes': probe[7:10:2].decode('ascii'),
             'screenshot': str(evidence_dir / 'resident-o65-open-screen.png')}
@@ -1627,9 +1628,9 @@ def run_resident_o65_open(timeout, evidence_dir):
         inspector=inspect_resident_o65_open,
         program=ROOT / 'integration-tests/atari-sio/boot-app/build/fnresident-o65-open.xex')
     trace = (run / 'nio.log').read_text(errors='replace')
-    if trace.count('NetworkDevice routed request') != 8:
-        raise RuntimeError('resident CIOV OPEN/GET/CLOSE/PUT did not dispatch eight real NetworkDevice requests')
-    for command in (1, 2, 4, 1, 4, 1, 3, 4):
+    if trace.count('NetworkDevice routed request') != 13:
+        raise RuntimeError('resident CIOV OPEN/GET/CLOSE/PUT did not dispatch thirteen real NetworkDevice requests')
+    for command in (1, 2, 4, 1, 4, 1, 3, 3, 4, 1, 3, 3, 4):
         if f'command={command}' not in trace:
             raise RuntimeError(f'resident CIOV OPEN/GET/CLOSE/PUT is missing NetworkDevice command={command}')
     if 'Resident N: fixture accepted GET open' not in trace:
@@ -1637,15 +1638,28 @@ def run_resident_o65_open(timeout, evidence_dir):
     if 'Resident N: fixture accepted PUT open' not in trace:
         raise RuntimeError('resident CIOV PUT OPEN did not reach the deterministic production protocol')
     if trace.count('Network fixture write count=1 offset=0 bytes=128') != 1 or \
-            'last=41 valid=1' not in trace:
+            'Network fixture write count=1 offset=0 bytes=128 first=41 second=41 last=41 valid=1' not in trace:
         raise RuntimeError('resident CIOV PUT did not dispatch one exact 128-byte write')
+    if trace.count('Network fixture write count=2 offset=128 bytes=0') != 1 or \
+            'Network fixture write count=2 offset=128 bytes=0 first=00 second=00 last=00 valid=1' not in trace:
+        raise RuntimeError('resident CIOV CLOSE did not commit the full body once at offset 128')
+    if trace.count('Network fixture write count=3 offset=0 bytes=3') != 1 or \
+            'Network fixture write count=3 offset=0 bytes=3 first=42 second=43 last=44 valid=1' not in trace:
+        raise RuntimeError('resident CIOV CLOSE did not flush one exact partial BCD body')
+    if trace.count('Network fixture write count=4 offset=3 bytes=0') != 1 or \
+            'Network fixture write count=4 offset=3 bytes=0 first=00 second=00 last=00 valid=1' not in trace:
+        raise RuntimeError('resident CIOV CLOSE did not commit the partial body once at offset 3')
+    if trace.count('Resident N: fixture committed body count=') != 2 or \
+            'Resident N: fixture committed body count=1 bytes=128' not in trace or \
+            'Resident N: fixture committed body count=2 bytes=3' not in trace:
+        raise RuntimeError('resident CIOV CLOSE did not make one commit for each complete body')
     pokey = run / 'pokey-siodata.log'
     if not pokey.is_file() or not pokey.stat().st_size:
         lines = [line for line in (run / 'altirra.log').read_text(errors='replace').splitlines()
                  if '[SIODATA]' in line]
         if lines:
             pokey.write_text('\n'.join(lines) + '\n')
-    result['network_dispatches'] = 8
+    result['network_dispatches'] = 13
     result['network_trace'] = str(run / 'nio.log')
     if pokey.is_file() and pokey.stat().st_size:
         result['pokey_trace'] = str(pokey)

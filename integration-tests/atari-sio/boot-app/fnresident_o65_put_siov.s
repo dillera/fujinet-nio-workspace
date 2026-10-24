@@ -37,10 +37,16 @@ _main:
         cpx #5
         jeq r_write
         cpx #6
-        jeq w_close
+        jeq w_commit
         cpx #7
-        jeq p_close
+        jeq p_commit
         cpx #8
+        jeq r_commit
+        cpx #9
+        jeq w_close
+        cpx #10
+        jeq p_close
+        cpx #11
         jeq r_close
         jmp bad
 w_open: lda #30
@@ -100,6 +106,37 @@ w_write:lda #143
 w_write_accept:
         inc step
         jmp ok
+w_commit:lda #15
+        jsr check_w
+        jcs bad
+        ldy #1
+        jsr read_w
+        cmp #3
+        jne bad
+        ldy #2
+        jsr read_w
+        cmp #15
+        jne bad
+        ldy #7
+        jsr read_w
+        cmp #$34
+        jne bad
+        iny
+        jsr read_w
+        cmp #$12
+        jne bad
+        ldy #9
+        jsr read_w
+        cmp #$80
+        jne bad
+        ldy #13
+        jsr read_w
+        jne bad
+        iny
+        jsr read_w
+        jne bad
+        inc step
+        jmp ok
 w_close:lda #9
         jsr check_w
         jcs bad
@@ -108,6 +145,8 @@ w_close:lda #9
 p_open: ldx #13
         jmp send_p
 p_write:ldx #18
+        jmp send_p
+p_commit:ldx #18
         jmp send_p
 p_close:ldx #6
 send_p: lda DCOMND
@@ -144,6 +183,10 @@ r_open: ldx #<reply_open
         jmp send_r
 r_write:ldx #<reply_write
         ldy #>reply_write
+        lda #18
+        jmp send_r
+r_commit:ldx #<reply_commit
+        ldy #>reply_commit
         lda #18
         jmp send_r
 r_close:ldx #<reply_close
@@ -230,4 +273,5 @@ ok:     lda #1
 expected_len:.byte 0
 reply_open: .byte $fd,1,13,0,$53,0,1,0,0,0,$34,$12,0
 reply_write:.byte $fd,3,18,0,$da,0,1,0,0,0,$34,$12,0,0,0,0,$80,0
+reply_commit:.byte $fd,3,18,0,$5a,0,1,0,0,0,$34,$12,0,0,0,0,0,0
 reply_close:.byte $fd,4,6,0,$08,0

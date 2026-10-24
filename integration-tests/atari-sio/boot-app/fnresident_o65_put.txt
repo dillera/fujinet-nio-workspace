@@ -1,14 +1,14 @@
 memory flush
-memory load #0x4400 "build/fnresident-o65-put-control.bin"
+memory load #0x4500 "build/fnresident-o65-put-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-put-siov.xex"
 registers flush
-run #0x4400 until (#0x06d0 = 0x01 OR cycle_count > 0xd00000)
+run #0x4500 until (#0x06d0 = 0x01 OR cycle_count > 0xd00000)
 assert #0x06d0 = 0x01 $$resident CIO PUT control completed$$
 assert #0x06d1 = 0x01 $$output N1 OPEN succeeds through public fn_open$$
 assert #0x06d2 = 0x00 $$all 128 CIO PUT calls succeed$$
 assert #0x06d3 = 0x01 $$CLOSE succeeds after the full buffered write$$
 assert #0x06d4 = 0x00 $$PUT peer saw exact DCB fields and every payload byte$$
-assert #0x06d5 = 0x09 $$one Open, one Write and one Close exchange reached SIOV$$
+assert #0x06d5 = 0x0c $$one Open, one Write, one commit and one Close exchange reached SIOV$$
 assert #0x06d6 = 0x00 $$PUT restores caller cc65 zero-page bytes$$

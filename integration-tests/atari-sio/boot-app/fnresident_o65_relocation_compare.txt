@@ -1,10 +1,10 @@
 memory flush
-memory load #0x4400 "build/fnresident-o65-relocation-compare-control.bin"
+memory load #0x4500 "build/fnresident-o65-relocation-compare-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-loader-siov.xex"
 memory load #0xa000 "build/fnresident-o65-module-0700.bin"
 assert #0xa000 = 0xa5 $$reference image was loaded at its comparison base$$
 registers flush
-run #0x4400 until (#0x06c0 = 0x01 OR cycle_count > 0xb00000)
+run #0x4500 until (#0x06c0 = 0x01 OR cycle_count > 0xb00000)
 assert #0x06c0 = 0x01 $$Atari-side o65 relocation exactly matches the reference image$$
