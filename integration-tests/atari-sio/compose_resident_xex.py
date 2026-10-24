@@ -39,8 +39,16 @@ def emit(out: bytearray, start: int, end: int, data: bytes) -> None:
     out.extend(data)
 
 
-def compose(installer: bytes, probe: bytes) -> bytes:
+def compose(installer: bytes, probe: bytes, foreign_hatabs: bool = False) -> bytes:
     out = bytearray(b"\xff\xff")
+    if foreign_hatabs:
+        # A real preceding INITAD phase installs a deliberately foreign N:
+        # entry.  The installer must leave it and MEMLO untouched.
+        prelude = bytes((0xa9, ord('N'), 0x8d, 0x1a, 0x03,
+                         0xa9, 0x00, 0x8d, 0x1b, 0x03,
+                         0xa9, 0xd0, 0x8d, 0x1c, 0x03, 0x60))
+        emit(out, 0x3000, 0x3000 + len(prelude) - 1, prelude)
+        emit(out, INITAD, INITAD + 1, b"\x00\x30")
     found_runad = False
     for start, end, data in segments(installer):
         if start == RUNAD and end == RUNAD + 1:
@@ -62,8 +70,10 @@ def main() -> int:
     ap.add_argument("installer", type=Path)
     ap.add_argument("probe", type=Path)
     ap.add_argument("output", type=Path)
+    ap.add_argument("--foreign-hatabs", action="store_true")
     ns = ap.parse_args()
-    ns.output.write_bytes(compose(ns.installer.read_bytes(), ns.probe.read_bytes()))
+    ns.output.write_bytes(compose(ns.installer.read_bytes(), ns.probe.read_bytes(),
+                                  ns.foreign_hatabs))
     return 0
 
 

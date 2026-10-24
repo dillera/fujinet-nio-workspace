@@ -22,6 +22,7 @@ from fnaccept_memory_layout import layout_report, validate_runtime_snapshot
 ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
 RESIDENT_INSTALL_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-install.atr"
+RESIDENT_FOREIGN_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-foreign.atr"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
@@ -1453,6 +1454,31 @@ def run_resident_installer(timeout, evidence_dir):
     return run_netsio(timeout, evidence_dir=evidence_dir, trace_serial=True,
                       explicit_cold_reset=True, boot_atr=RESIDENT_INSTALL_ATR,
                       inspector=inspect_resident_installer)
+
+def inspect_resident_foreign(token, evidence_dir):
+    """Failure gate: a preceding INITAD owns N:, so nothing may be changed."""
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    with AltirraBridge.from_token_file(token) as bridge:
+        install = bridge.peek(0x0b00, 32)
+        hatabs = bridge.peek(0x031a, 35)
+        memlo = bridge.peek16(0x02e7)
+    (evidence_dir / 'resident-foreign.json').write_text(json.dumps({
+        'installer_raw': install.hex(), 'hatabs_raw': hatabs.hex(), 'memlo': memlo,
+    }, indent=2) + '\n')
+    if install[:4] != b'NRI!' or install[5] != 4:
+        raise RuntimeError('foreign N: rejection was not reported')
+    if memlo != _u16(install, 8) or _u16(install, 10) != _u16(install, 8):
+        raise RuntimeError('failed foreign install changed MEMLO')
+    if hatabs[0:3] != bytes((ord('N'), 0x00, 0xd0)):
+        raise RuntimeError('failed foreign install changed HATABS')
+    return {'signature': 'NRF!', 'old_memlo': memlo, 'outcome': install[5]}
+
+def run_resident_foreign(timeout, evidence_dir):
+    if not RESIDENT_FOREIGN_ATR.is_file():
+        raise RuntimeError(f'resident foreign ATR is missing: {RESIDENT_FOREIGN_ATR}')
+    return run_netsio(timeout, evidence_dir=evidence_dir, explicit_cold_reset=True,
+                      boot_atr=RESIDENT_FOREIGN_ATR, inspector=inspect_resident_foreign)
 
 def run_native(timeout, evidence_dir=None, observe=False):
     before=set(Path('/tmp').glob('altirra-bridge-*.token')); cmd,env,temps=altirra_command(True)

@@ -30,6 +30,13 @@ class ResidentInstallTests(unittest.TestCase):
         self.assertEqual(composed[1], (0x02E2, 0x02E3, b"\x00\x1d"))
         self.assertEqual(composed[-1], (0x02E0, 0x02E1, b"\x00\x40"))
 
+    def test_foreign_fixture_precedes_installer_init(self):
+        installer = b"\xff\xff" + segment(0x1D00, b"\x60") + segment(0x02E0, b"\x00\x1d")
+        probe = b"\xff\xff" + segment(0x4000, b"\x60") + segment(0x02E0, b"\x00\x40")
+        composed = list(compose.segments(compose.compose(installer, probe, foreign_hatabs=True)))
+        self.assertEqual(composed[0][0], 0x3000)
+        self.assertEqual(composed[1], (0x02E2, 0x02E3, b"\x00\x30"))
+
     def test_map_gate_rejects_missing_or_wrong_resident_range(self):
         good = {"STARTUP": (0x1D00, 0x1D62), "ONCE": (0x1D63, 0x1D6E),
                 "CODE": (0x1D6F, 0x27B0), "RODATA": (0x27B1, 0x27C2),

@@ -103,6 +103,10 @@ emulator runner, or treat virtual results as physical-SIO proof.
 - `fnresident_memory_layout.py` and its unit test reject malformed maps;
   runtime inspection rejects stale vectors, changed MEMLO, missing N:, a
   failed initializer, or a resident range overlapping stack/display memory.
+  A second real INITAD fixture preinstalls a foreign `N:` table at `$d000` and
+  proves the installer reports the foreign outcome while retaining MEMLO
+  `$0700` and the exact foreign HATABS bytes; evidence is
+  `test-evidence/atari-sio-resident-foreign-live/netsio/resident-foreign.json`.
 
 ## Code Map
 

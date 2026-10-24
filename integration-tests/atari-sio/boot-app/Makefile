@@ -8,10 +8,13 @@ RESIDENT_APP := $(APPS)/build/atari/bin/fnresident.xex
 RESIDENT_PROBE := $(OUT)/fnresident-probe.xex
 RESIDENT_XEX := $(OUT)/fnresident-install.xex
 RESIDENT_ATR := $(OUT)/fnresident-install.atr
+RESIDENT_FOREIGN_XEX := $(OUT)/fnresident-foreign.xex
+RESIDENT_FOREIGN_ATR := $(OUT)/fnresident-foreign.atr
 
-.PHONY: all resident clean
+.PHONY: all resident resident-foreign clean
 all: $(ATR)
 resident: $(RESIDENT_ATR)
+resident-foreign: $(RESIDENT_FOREIGN_ATR)
 
 $(OUT):
 	mkdir -p $@
@@ -37,11 +40,20 @@ $(RESIDENT_PROBE): fnresident_probe.s fnresident-probe.cfg | $(OUT)
 $(RESIDENT_XEX): $(RESIDENT_APP) $(RESIDENT_PROBE) ../compose_resident_xex.py | $(OUT)
 	python3 ../compose_resident_xex.py $(RESIDENT_APP) $(RESIDENT_PROBE) $@
 
+$(RESIDENT_FOREIGN_XEX): $(RESIDENT_APP) $(RESIDENT_PROBE) ../compose_resident_xex.py | $(OUT)
+	python3 ../compose_resident_xex.py --foreign-hatabs $(RESIDENT_APP) $(RESIDENT_PROBE) $@
+
 $(RESIDENT_ATR): $(RESIDENT_XEX) $(PICOBOOT) Makefile | $(OUT)
 	rm -rf $(OUT)/resident-stage
 	mkdir -p $(OUT)/resident-stage
 	cp $(RESIDENT_XEX) $(OUT)/resident-stage/coltest.xex
 	cd $(APPS) && dir2atr -m -D -B $(PICOBOOT) $(abspath $@) $(abspath $(OUT)/resident-stage)
+
+$(RESIDENT_FOREIGN_ATR): $(RESIDENT_FOREIGN_XEX) $(PICOBOOT) Makefile | $(OUT)
+	rm -rf $(OUT)/resident-foreign-stage
+	mkdir -p $(OUT)/resident-foreign-stage
+	cp $(RESIDENT_FOREIGN_XEX) $(OUT)/resident-foreign-stage/coltest.xex
+	cd $(APPS) && dir2atr -m -D -B $(PICOBOOT) $(abspath $@) $(abspath $(OUT)/resident-foreign-stage)
 
 clean:
 	rm -rf $(OUT)
