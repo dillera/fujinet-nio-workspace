@@ -1,0 +1,9 @@
+memory flush
+memory load #0x4000 "build/fnresident-o65-direct-control.bin"
+memory load #0x0700 "build/fnresident-o65-module-0700.bin"
+memory load atari "build/fnresident-o65-loader-siov.xex"
+registers flush
+run #0x4000 until (CP = 0x0000 OR #0x0680 = 0x01)
+assert CP != 0x0000 $$relocated payload does not jump through an uninitialized vector$$
+assert #0x0680 = 0x01 $$host-relocated payload returns from fn_init$$
+assert #0x0681 = 0x00 $$host-relocated payload fn_init returns FN_OK$$

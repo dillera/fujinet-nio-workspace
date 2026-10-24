@@ -391,9 +391,8 @@ installer/bootstrap at a fixed staging address; it must first inspect HATABS
 ownership, calculate `base=align(max(live_MEMLO, result_window_end))`, reject
 if `[old_MEMLO, base+module_size)` conflicts with stack, display, or staging,
 then load/relocate/zero BSS, call `fn_init`, raise MEMLO, and publish HATABS.
-The next implementation increment must prove that loader against the full
-archive closure at two allocated bases before it replaces the accepted fixed
-scaffold.
+The following production increment (recorded below) supersedes this proposed
+layout with an executable bounded loader and two live MEMLO-derived bases.
 
 MyPicoDOS ignores MEMLO for explicit XEX segments, so staging is a separate
 safety condition.  The current fixed-image bootstrap avoids an `$1d00`
@@ -562,3 +561,68 @@ evidence: resident installer `RPR!` at
 acceptance `ADP!` at
 `test-evidence/atari-sio-public-api-clock-20261024-195015/`, and D1 boot
 `NIO!` at `test-evidence/atari-sio-boot-20261024-195026/`.
+
+## Production o65 resident-loader increment
+
+`repos/nio-core-apps` now supplies a separate, crt0-free
+`fnresident-module.o65` rather than reusing the fixed `$1d00` image.  It
+contains the real public Atari archive closure (`fn_init`, `fn_open`,
+`fn_read`, `fn_write`, `fn_info`, and `fn_close`), the eventual two handle
+records and two 128-byte caches, library DATA/BSS, and a minimal six-vector
+address-minus-one CIO table.  This increment still exposes only deterministic
+`FNCNOT` stubs; no network operation is published yet.
+
+The bounded loader accepts only the validated FNR1-wrapped cc65 16-bit/small
+o65 profile: contiguous TEXT/DATA/BSS, no imports/exports, and TEXT/DATA/BSS/
+ZP low, high, and word relocations.  It saves the 26-byte cc65 ZP bank,
+relocates to `align(live MEMLO)`, copies initialized bytes, zeroes BSS,
+establishes the resident software stack, calls `fn_init`, validates the copied
+marker/table/vectors, then atomically publishes HATABS and MEMLO.  Wrapper,
+stage, target, stack, display, and transient-loader bounds are checked before
+destination writes.  HATABS is scanned *before* range allocation: an owned
+entry is idempotent even when raised MEMLO could not fit another copy; a
+foreign entry is left untouched.
+
+| measured component | size / live range |
+|---|---:|
+| initialized TEXT+DATA | 9,923 bytes |
+| BSS / cc65 ZP | 2,027 bytes / 26 bytes at `$82-$9b` while resident C runs |
+| payload allocation / resident C stack | 11,950 / 256 bytes |
+| permanent allocation at MEMLO `$0700` | `$0700-$36ad` (`MEMLO=$36ae`, 12,206 bytes) |
+| permanent allocation at MEMLO `$0702` | `$0702-$36af` (`MEMLO=$36b0`) |
+| observed free range below `$941f` stack floor | 23,921 / 23,919 bytes respectively |
+| transient loader / staged FNR1 / probe | `$3800-$3f7d` (1,918 bytes) / `$5800-$924d` (14,926 bytes) / `$4000-$4123` (292 bytes) |
+
+The installer result is transient at `$5400`; it is explicitly outside the
+resident interval.  The loader and the probe are both above the target range.
+MyPicoDOS demonstrably continues using low RAM after an `INITAD` routine, so
+the configuration-ATR composition first loads the staged module and the
+independently linked probe, then uses a six-byte `$4200` transient launcher to
+call the loader and enter the probe.  This is a loader-safety arrangement for
+the engineering launcher, not a DOS requirement or a permanent low-memory
+reservation.  It proves the retained handler bytes and an OPEN-stub call from
+the independent program.  A reproducible genuine BASIC/DOS post-install load
+remains the intentionally deferred packaging/BASIC fixture increment; none is
+claimed here.
+
+### Executed evidence
+
+- `make -C integration-tests/atari-sio/boot-app test-resident-o65` passed:
+  actual cc65 module relocation and `fn_init` at `$0700`; copied BSS state;
+  FNR1/o65 relocation and vector publication; and a corrupted-wrapper
+  negative test that leaves MEMLO, HATABS, and `$0700` unchanged.
+- Live production NetSIO/Altirra runs passed with retained evidence:
+  - `--resident-o65-installer`: `RPR!`, `$0700 -> $36ae`,
+    `test-evidence/atari-sio-resident-o65-normal-cli/netsio/`.
+  - `--resident-o65-altbase`: `RPR!`, `$0702 -> $36b0`,
+    `test-evidence/atari-sio-resident-o65-altbase-cli/netsio/`.
+  - `--resident-o65-idempotent`: `RPR!`, outcome 1, unchanged `$36ae`,
+    `test-evidence/atari-sio-resident-o65-idempotent-cli/netsio/`.
+  - `--resident-o65-foreign`: outcome 4, unchanged `$0700` and foreign
+    `N:$d000`,
+    `test-evidence/atari-sio-resident-o65-foreign-cli/netsio/`.
+
+The fixed `$1d00` installer and its independent lifecycle regressions remain
+in place as reference coverage.  The next increment may add CIO operations,
+but must retain this bounded loader, transient-result discipline, and the
+two-base/ownership gates.

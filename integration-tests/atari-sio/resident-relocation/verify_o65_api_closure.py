@@ -171,6 +171,10 @@ def main() -> int:
     parser.add_argument("module", type=Path, nargs="?")
     parser.add_argument("--output-a", type=Path)
     parser.add_argument("--output-b", type=Path)
+    parser.add_argument("--output-relocated", type=Path,
+                        help="write one relocated image for an execution test")
+    parser.add_argument("--relocation-base", type=lambda text: int(text, 0),
+                        help="base used with --output-relocated")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
@@ -193,6 +197,12 @@ def main() -> int:
         args.output_a.write_bytes(relocate(module, 0x2000, 0x0082))
     if args.output_b:
         args.output_b.write_bytes(relocate(module, 0x5000, 0x0082))
+    if args.output_relocated:
+        if args.relocation_base is None:
+            parser.error("--output-relocated requires --relocation-base")
+        if not 0 <= args.relocation_base <= 0xFFFF:
+            parser.error("--relocation-base must be a 16-bit address")
+        args.output_relocated.write_bytes(relocate(module, args.relocation_base, 0x0082))
     print(summary(module))
     return 0
 
