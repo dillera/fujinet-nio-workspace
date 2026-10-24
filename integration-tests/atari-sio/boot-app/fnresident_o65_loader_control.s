@@ -27,7 +27,7 @@ _main:
         sta $0058
         lda #$9c
         sta $0059
-        jsr $3800
+        jsr $3c00
         lda #1
         sta $0680
 halt:   jmp halt

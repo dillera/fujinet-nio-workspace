@@ -32,22 +32,22 @@ _main:
         sta $0058
         lda #$9c
         sta $0059
-        jsr $3800
+        jsr $3c00
 
         lda #<$0700
         sta actual+1
         lda #>$0700
         sta actual+2
-        lda #<$9000
+        lda #<$a000
         sta expected+1
-        lda #>$9000
+        lda #>$a000
         sta expected+2
         ; fn_init() deliberately mutates initialized library state. Compare
         ; the complete relocated TEXT closure; DATA/BSS lifecycle is covered
         ; by the loader/runtime tests below.
-        lda #<$2a16
+        lda #<$2db0
         sta remaining
-        lda #>$2a16
+        lda #>$2db0
         sta remaining+1
         lda #0
         sta offset

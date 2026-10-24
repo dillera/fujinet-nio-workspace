@@ -9,6 +9,7 @@ CIOV   = $E456
 IOCB   = $0340
 OPEN   = $03
 GETCHR = $07
+CIOPUT = $0B
 CLOSE  = $0C
 OPNIN  = $04
 RESULT = $5440
@@ -60,6 +61,50 @@ _main:
         sta IOCB+2,x
         jsr CIOV
         sty close_2_status
+
+        ; A 128-byte output session flushes exactly one bounded public
+        ; fn_write() request. The deterministic fixture checks every byte.
+        ldx #$20
+        lda #OPEN
+        sta IOCB+2,x
+        lda #<write_uri
+        sta IOCB+4,x
+        lda #>write_uri
+        sta IOCB+5,x
+        lda #$08
+        sta IOCB+10,x
+        jsr CIOV
+        sty write_open_status
+        lda #1
+        sta write_put_status
+        ; Keep the loop index in this IOCB's unused AUX2 field. CIOV may use
+        ; its private scratch while executing, whereas the caller-owned IOCB
+        ; remains stable for the lifetime of this OPEN.
+        ldx #$20
+        lda #0
+        sta IOCB+11,x
+write_loop:
+        ldx #$20
+        lda #'A'
+        pha
+        ldx #$20
+        lda #CIOPUT
+        sta IOCB+2,x
+        pla
+        jsr CIOV
+        cpy #1
+        beq :+
+        sty write_put_status
+:       ldx #$20
+        inc IOCB+11,x
+        lda IOCB+11,x
+        cmp #128
+        bne write_loop
+        ldx #$20
+        lda #CLOSE
+        sta IOCB+2,x
+        jsr CIOV
+        sty write_close_status
         lda #'R'
         sta RESULT
         lda #'P'
@@ -68,7 +113,7 @@ _main:
         sta RESULT+2
         lda #'!'
         sta RESULT+3
-        lda #4
+        lda #5
         sta RESULT+4
         lda open_status
         sta RESULT+5
@@ -86,9 +131,16 @@ _main:
         sta RESULT+11
         lda close_2_status
         sta RESULT+12
+        lda write_open_status
+        sta RESULT+13
+        lda write_put_status
+        sta RESULT+14
+        lda write_close_status
+        sta RESULT+15
 halt:   jmp halt
 
 uri:    .byte "N1:fixture://resident-open", 0
+write_uri: .byte "N1:fixture://resident-write", 0
 open_status: .byte 0
 get_1_status: .byte 0
 byte_1: .byte 0
@@ -97,3 +149,6 @@ byte_2: .byte 0
 close_status: .byte 0
 reopen_status: .byte 0
 close_2_status: .byte 0
+write_open_status: .byte 0
+write_put_status: .byte 0
+write_close_status: .byte 0

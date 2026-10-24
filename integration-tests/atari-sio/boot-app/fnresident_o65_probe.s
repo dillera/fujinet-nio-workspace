@@ -1,5 +1,5 @@
 ; Second independently loaded XEX for the dynamic o65 resident-loader gate.
-; The result record is transient at $8300; the installed payload itself is
+; The result record is transient at $9000; the installed payload itself is
 ; below the loader and must survive this $4000 program load.
 
         .export _main
@@ -7,7 +7,7 @@
 
 HATABS  = $031A
 MEMLO   = $02E7
-RESULT  = $8300
+RESULT  = $9000
 PROBE   = $5440
 FNCNOT  = $92
 TABLE   = $80

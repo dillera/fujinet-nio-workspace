@@ -39,7 +39,7 @@ _main:
 
         ; Install the real production o65 payload through its transient
         ; loader before calling the published HATABS entry.
-        jsr $3800
+        jsr $3c00
 
         ldx #0
 fill_zp:
@@ -197,7 +197,9 @@ setup_bad_mode:
         sta IOCB+4,x
         lda #>uri_c
         sta IOCB+5,x
-        lda #8
+        ; OPNIN and OPNOT are the two modes implemented by the resident
+        ; handler. An unrelated CIO mode must still fail locally.
+        lda #0
         sta IOCB+10,x
         rts
 

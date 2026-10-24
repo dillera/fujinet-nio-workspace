@@ -761,7 +761,7 @@ the explicitly unsupported stubs.
 
 The larger public closure exposed a loader defect: staging at `$4300` put the
 o65 source over the old transient result window at `$5400`; result writes were
-corrupting the source before relocation. The result record moved to `$8300`,
+corrupting the source before relocation. The result record is now at `$9000`,
 the image packer rejects a staged image that reaches that window, and the
 loader now takes relocation bases from its immutable recorded allocation
 start. `fnresident_o65_relocation_compare` executes the production Atari-side
@@ -784,3 +784,38 @@ Executed evidence:
 - `make -C repos/fujinet-nio-lib check` passed, including the assembled Atari
   transport suite. The D1 boot regression was re-run separately with retained
   evidence; it remains a distinct boot gate.
+
+## Increment: resident CIO PUT
+
+The resident N: handler now accepts `OPNOT` output OPENs and maps them only to
+public `fn_open(..., FN_METHOD_PUT, ...)`. Each owned output IOCB uses its
+existing bounded 128-byte cache. `PUTCHR` accumulates bytes in order and makes
+exactly one public `fn_write()` call only when the cache is full; an uncertain
+write failure latches the slot instead of replaying it. CLOSE intentionally
+does not commit a partial cache: unknown-length POST/PUT commitment remains
+deferred. GET, CLOSE, STATUS and SPECIAL behavior is otherwise unchanged.
+
+The write closure raises the measured initialized resident image to 11,739
+bytes (CODE 11,696, RODATA 16, DATA 27), with 1,442 BSS bytes, 26 cc65 ZP
+bytes and its 256-byte resident C stack. The protected `$0700` allocation is
+therefore 13,437 bytes and publishes MEMLO `$3b7d`. The transient loader,
+launcher/probe and staged o65 source were moved to `$3c00`, `$4400/$4500` and
+`$4800-$8d35`; diagnostics are at `$9000`. These are transient ranges only;
+the byte-for-byte relocation comparison and range gate reject overlap.
+
+Executed evidence:
+
+- `make -C integration-tests/atari-sio/boot-app test-resident-o65` passes the
+  lifecycle and relocation suite plus `fnresident_o65_put`: 128 real handler
+  PUT calls produce exactly Open/Write/Close W/P/R exchanges, validate each
+  of the 128 transmitted bytes and DCB count/AUX/direction, and preserve
+  caller cc65 ZP.
+- `test-evidence/atari-sio-resident-o65-open-20261024-235828/netsio/` records
+  `RPR!` v5 from the independently loaded CIOV caller. Its production
+  NetworkDevice trace contains eight ordered operations
+  Open/Read/Close/Open/Close/Open/Write/Close, exactly one 128-byte `A`
+  payload write (`valid=1`) and no duplicate write.
+
+`PUTREC` is deliberately not used for this byte-oriented increment: the live
+caller uses the verified CIO `PUTCHR` command `$0b`. Unknown-length commitment,
+STATUS and BASIC acceptance remain out of scope.

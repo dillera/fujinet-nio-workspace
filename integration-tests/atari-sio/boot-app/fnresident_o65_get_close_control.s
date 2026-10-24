@@ -35,7 +35,7 @@ _main:
         lda #$9c
         sta $0059
 
-        jsr $3800
+        jsr $3c00
         ldx #0
 fill_zp:
         txa

@@ -1,15 +1,15 @@
 memory flush
-memory load #0x4000 "build/fnresident-o65-loader-control.bin"
+memory load #0x4400 "build/fnresident-o65-loader-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-loader-siov.xex"
 ; A malformed staged wrapper is rejected before the destination or HATABS is
 ; touched.  This is the failure-path counterpart to the real relocation test.
-memory write #0x4300 0x(00)
+memory write #0x4800 0x(00)
 registers flush
-run #0x4000 until (#0x0680 = 0x01 OR cycle_count > 0x500000)
+run #0x4400 until (#0x0680 = 0x01 OR cycle_count > 0x500000)
 assert #0x0680 = 0x01 $$failed bounded loader returned to transient caller$$
-assert #0x8305 = 0x06 $$invalid FNR1 wrapper is reported as a format failure$$
+assert #0x9005 = 0x06 $$invalid FNR1 wrapper is reported as a format failure$$
 assert #0x02e7 = 0x00 $$failed loader leaves MEMLO low byte unchanged$$
 assert #0x02e8 = 0x07 $$failed loader leaves MEMLO high byte unchanged$$
 assert #0x031a = 0x00 $$failed loader does not publish N: into HATABS$$

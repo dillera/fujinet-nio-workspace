@@ -1,10 +1,10 @@
 memory flush
-memory load #0x4000 "build/fnresident-o65-open-control.bin"
+memory load #0x4400 "build/fnresident-o65-open-control.bin"
 memory load atari "build/fnresident-o65-loader.xex"
 memory load atari "build/fnresident-o65-stage.xex"
 memory load atari "build/fnresident-o65-open-siov.xex"
 registers flush
-run #0x4000 until (#0x0680 = 0x01 OR cycle_count > 0x900000)
+run #0x4400 until (#0x0680 = 0x01 OR cycle_count > 0x900000)
 assert #0x0680 = 0x01 $$resident CIO OPEN control completed$$
 assert #0x0681 = 0x01 $$first N1 OPEN succeeds through public fn_open$$
 assert #0x0682 = 0x92 $$nested foreground entry is rejected$$
