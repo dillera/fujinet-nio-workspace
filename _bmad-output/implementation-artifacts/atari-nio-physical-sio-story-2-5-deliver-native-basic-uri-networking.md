@@ -62,6 +62,24 @@ emulator runner, or treat virtual results as physical-SIO proof.
 | boundary | STATUS, first read, or CLOSE after POST/PUT | buffered bytes flush; exactly one zero-length commit precedes info/read/close | failed commit is reported and never duplicated |
 </frozen-after-approval>
 
+## Implementation-preparation evidence
+
+- **Completed prerequisite (library `82a23cce`).** `fn_open_exchange()` now
+  reserves a local session record before sending Open.  A full local table
+  returns `FN_ERR_NO_HANDLES`, leaves the output at `FN_INVALID_HANDLE`, and
+  emits no remote Open, including when `FN_OPEN_ALLOW_EVICT` is supplied.
+  The flag remains a service-side wire option when local capacity exists; it
+  never evicts an owned local session.  The BBC-specific Open path continues
+  to close an already-opened OS channel on local exhaustion and now clears the
+  caller's handle before returning the same error.
+- The focused `open_wire_test` covers full/released tables, ordinary and
+  translated Open, the allow-evict flag, ownership preservation, and the
+  no-dispatch condition.  Verification passed: library `make check`; rebuilt
+  Atari public-API acceptance (`ADP!`, including real Network Open); all 54
+  Atari fixture tests; and the native/NetSIO D1 page-6 boot gate.  The latter
+  evidence is retained at
+  `test-evidence/atari-sio-boot-20261024-093602`.
+
 ## Code Map
 
 - `repos/cc65/include/_atarios.h:69-131` and
@@ -74,9 +92,10 @@ emulator runner, or treat virtual results as physical-SIO proof.
 - `repos/fujinet-nio-lib/include/fujinet-nio.h:35-54,217-248,590-805` --
   cc65 limits (128-byte URL, two sessions), `fn_handle_t`, GET/PUT/POST,
   unknown-body flag, and required public calls.  No new public API is needed.
-- `repos/fujinet-nio-lib/src/common/fn_open.c:8-49` -- current exhaustion bug:
-  no free local session returns success with an untracked handle; fix and test
-  this before depending on normal CIO OPEN exhaustion failure.
+- `repos/fujinet-nio-lib/src/common/fn_open.c:8-49` -- session ownership is
+  reserved before Open is sent (library `82a23cce`), so a full local table
+  returns `FN_ERR_NO_HANDLES` without an untracked remote handle.  CIO OPEN
+  may depend on this prerequisite.
 - `repos/nio-core-apps/makefiles/build.mk:31-110` and
   `makefiles/cc65-atari-nio.cfg` -- current cc65 XEX/archive pattern, ZP
   `$82-$ff`, 2 KiB C stack, and `fnaccept` constrained-link precedent.
