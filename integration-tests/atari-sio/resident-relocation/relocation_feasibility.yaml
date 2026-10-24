@@ -1,0 +1,9 @@
+name: Atari resident relocation feasibility
+configs:
+  - ../../../repos/cc65-clib/tests/harness/harness.yaml
+src_files:
+  - relocation_feasibility.s
+ld_flags:
+  - -t
+  - none
+test_script: relocation_feasibility.txt

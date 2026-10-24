@@ -267,3 +267,165 @@ command, or unit/session scheme was copied, translated, or adapted.
 Physical SIO timing/electrical validation (Epic 3), legacy FujiNet `N:`
 protocols or device IDs, PROC delivery, BASIC `N:` compatibility beyond the
 defined supported URI/modes, and a transport or NetworkDevice redesign.
+
+## Resident relocation feasibility report
+
+This is a focused architecture investigation.  It adds no production
+relocator, CIO network operation, BASIC tokenizer, or embedded-adapter work.
+
+### Measured present scaffold
+
+The committed `fnresident` linker map uses the fixed `$1d00` image below.
+`LOWBSS` and `INIT` are absent, not zero-sized hidden allocations.
+
+| segment | linked range | bytes |
+|---|---:|---:|
+| ZEROPAGE | `$0082-$009b` | 26 |
+| STARTUP | `$1d00-$1d62` | 99 |
+| ONCE | `$1d63-$1d6e` | 12 |
+| CODE | `$1d6f-$27ac` | 2,622 |
+| RODATA | `$27ad-$27be` | 18 |
+| DATA | `$27bf-$27ee` | 48 |
+| BSS | `$27ef-$2ec5` | 1,751 |
+| **resident range** | **`$1d00-$2ec5`** | **4,550** |
+
+Its initialized bytes total 2,799; the XEX is 2,811 bytes including the Atari
+load/run records.  The current range starts 5,632 bytes above live
+`MEMLO=$0700`, so raising MEMLO to `$2ec6` reserves 10,182 bytes.  The extra
+5,632 bytes are fixed-address waste, not payload.  The biggest contributors
+are `fn_state` (267 code + 1,217 BSS + 1 data = 1,485), `fnresident` (1,252
+code + 2 rodata = 1,254), `fn_transport` (585 code + 529 BSS + 6 data =
+1,120), `fn_init` (108), and the cc65 startup/runtime closure (401 code, 41
+data, 12 ONCE, 5 BSS, 99 STARTUP, and 26 ZP).  The handler table itself is
+only 25 bytes (9 code + 16 rodata); the footprint is library state and the
+fixed link address, not the six vectors.
+
+The existing live map/runtime gate reports `MEMTOP=$9c1f`, a 2,048-byte cc65
+stack reserve with floor `$941f`, and Graphics-0 display allocation above
+that floor.  The C stack is an upper-memory reservation, not part of the
+resident image.  The 26-byte cc65 ZP allocation is likewise shared runtime
+state: it cannot be copied to a new base and an installed image must retain
+its compiler/runtime ZP contract.
+
+### Complete public-API closure measurement
+
+`integration-tests/atari-sio/resident-relocation/resident_api_closure.c`
+links exactly the current Atari archive closure for `fn_init`, `fn_open`,
+`fn_write`, `fn_read`, `fn_info`, and `fn_close`.  It is a link-only
+measurement, never an installed handler.  It includes two handles and two
+128-byte cache buffers, which exercises the configured two-session API limit.
+
+| segment | linked range | bytes |
+|---|---:|---:|
+| ZEROPAGE | `$0082-$009b` | 26 |
+| STARTUP | `$1d00-$1d62` | 99 |
+| ONCE | `$1d63-$1d6e` | 12 |
+| CODE | `$1d6f-$444d` | 9,951 |
+| RODATA | `$444e-$447f` | 50 |
+| DATA | `$4480-$44af` | 48 |
+| BSS | `$44b0-$4ca1` | 2,034 |
+| **closure range** | **`$1d00-$4ca1`** | **12,194** |
+
+It has 10,160 initialized bytes and a 10,172-byte XEX.  Its largest linked
+members are `fn_rw` (1,517), `fn_state` (1,485), `fn_open` (1,263),
+`fn_transport` (1,120), `fn_packet_build_rw` (927),
+`fn_packet_build_open` (734), the closure caller (601, including 271 BSS),
+`fn_packet_parse_common` (560), `fn_packet_parse_read` (528),
+`fn_packet_parse_info` (436), `fn_info_close` (427), and
+`fn_packet_header` (389).  This identifies normal public API packet build and
+parse code—not duplicate storage—as the reason a real N: handler is much
+larger than the current installer scaffold.
+
+The two cache buffers are exactly 256 of the caller's 271 BSS bytes.  A final
+handler may map all eight IOCBs to a bounded set of **two active cache/handle
+records** because `FN_MAX_SESSIONS=2`; a third concurrent OPEN must fail.  It
+does not need eight 128-byte buffers.  Conservatively allow another 48 bytes
+for eight IOCB-to-slot records and status flags, plus the actual CIO adapter,
+handler table, URI/mode parsing scratch, and result/state.  The 12,194-byte
+closure is therefore a measured lower bound, not an asserted final size; the
+first real CIO-operation map must replace this link-only caller before fixing
+the final allocation ceiling.
+
+At an initial `$0700` allocation base, this measured closure would end at
+`$36a2`.  It must not actually start there while the installer result occupies
+`$0b00-$0b27`: that current 40-byte machine-readable result would be
+overwritten.  A dynamic allocator must reserve the contiguous region from old
+MEMLO and use at least aligned `$0b28` as the payload base (or relocate the
+installer result below/away from the allocation).  This makes the result
+window and any probe records explicit allocation constraints rather than
+assuming that a raised MEMLO protects them automatically.
+
+### Relocation and staging findings
+
+`relocation_feasibility.s` is a soft65c02 executable proof, not a protocol
+peer.  It copies one code/data blob, applies its recorded absolute-word
+fixup, publishes an address-minus-one `N` HATABS vector, and calls it at both
+`$3000` and `$4800`.  Both calls read their distinct relocated data.  Its
+negative control copies the same bytes to `$5800` without the fixup and proves
+that the absolute operand still reads the source data rather than destination
+data.  Thus byte-copying an XEX or a fixed linked segment is not relocation.
+
+ld65 `load`/`run` is useful but deliberately not mistaken for this requirement.
+The executable `load_run_probe` links DATA with `load=$5004`, `run=$2400`,
+and `define=yes`; it verifies generated `__DATA_LOAD__=$5004`,
+`__DATA_RUN__=$2400`, and `__DATA_SIZE__=2`.  The linked `LDA` operand is
+`$2400`, while the file carries the two data bytes at `$5004`.  This is the
+supported model described in the cc65 discussion
+<https://cc65.github.io/mailarchive/2003-10/3700.html>: it lets a transient
+loader copy a known source to a **fixed link-time RUN address** using generated
+symbols.  It does not make RUN equal to a runtime-selected `MEMLO`, and so
+cannot by itself provide a compact dynamic resident handler.
+
+cc65 also supports o65 modules, whose ld65 writer emits text/data relocation
+records (`WORD`, `HIGH`, `LOW`, and segment forms).  The `o65_probe` links a
+CODE-to-DATA absolute reference; `co65 --no-output --verbose` verifies exactly
+one text relocation.  The checked-in `libsrc/common/modload.s` is an existing
+cc65 o65 parser/relocator, but it allocates with the application heap.  That
+does not meet the resident contract on its own: an installer needs an explicit
+live-MEMLO arena and must raise MEMLO only after ownership and bounds checks.
+
+**Recommendation:** use an o65 resident payload plus a small, bounded
+address-taking loader based on the supported o65 format/relocation semantics,
+not a hand-maintained table and not `load/run` alone.  Keep the transient
+installer/bootstrap at a fixed staging address; it must first inspect HATABS
+ownership, calculate `base=align(max(live_MEMLO, result_window_end))`, reject
+if `[old_MEMLO, base+module_size)` conflicts with stack, display, or staging,
+then load/relocate/zero BSS, call `fn_init`, raise MEMLO, and publish HATABS.
+The next implementation increment must prove that loader against the full
+archive closure at two allocated bases before it replaces the accepted fixed
+scaffold.
+
+MyPicoDOS ignores MEMLO for explicit XEX segments, so staging is a separate
+safety condition.  The current fixed-image bootstrap avoids an `$1d00`
+segment on reload, but its `$3800` bootstrap cannot coexist with the measured
+dynamic closure (payload from `$0b28` would reach `$3aca`).  A feasible next
+layout is a fixed transient bootstrap at `$5600`, initialized o65 staging at
+`$5800`, and a hard target-end ceiling of `$5600`.  With the measured closure,
+the target is `$0b28-$3ac9` and staging ends `$7faf`, below the observed
+`$941f` stack floor.  `resident_allocation_plan.py` makes those arithmetic
+constraints executable and rejects one-byte target/bootstrap and
+staging/stack overruns.  The real loader must retain the same checks and a
+second-XEX test proving no active resident interval is written before its
+HATABS ownership check.
+
+### Executable gates added by this investigation
+
+- `make -C integration-tests/atari-sio/resident-relocation relocation-feasibility`
+  -- two relocated bases, HATABS-compatible vector, and unrelocated absolute
+  reference negative control.
+- `make -C integration-tests/atari-sio/resident-relocation load-run-symbols`
+  -- independent `__DATA_LOAD__`, `__DATA_RUN__`, and `__DATA_SIZE__` proof.
+- `make -C integration-tests/atari-sio/resident-relocation o65-relocation-metadata`
+  -- ld65 o65 output parsed by `co65`, with one real relocation record.
+- `make -C integration-tests/atari-sio/resident-relocation allocation-plan`
+  -- dynamic MEMLO/result-window calculation and staging/target boundary
+  rejection for the measured closure.
+- `make -C integration-tests/atari-sio/resident-relocation api-closure-map`
+  -- reproducible current public-API closure map and largest-module report.
+- `python3 -m unittest discover -s integration-tests/atari-sio/tests -p
+  'test_resident_relocation_feasibility.py' -q` -- runs the four executable
+  mechanism checks.
+
+The accepted fixed installer, its idempotence/foreign-owner tests, the public
+API acceptance, library gate, and D1 boot regression remain unchanged by this
+investigation.

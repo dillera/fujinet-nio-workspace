@@ -1,0 +1,11 @@
+memory load atari "${BINARY_PATH}"
+symbols load "${SYMBOLS_PATH}"
+registers flush
+run $_test_func until (CP = $end_relocation OR cycle_count > 100000)
+assert CP = $end_relocation $$relocation feasibility routine completed$$
+assert $_test_result = 0x31 $$relocated $3000 vector reads its relocated data$$
+assert $_test_result + 1 = 0x42 $$relocated $4800 vector reads its separate relocated data$$
+assert $_test_result + 2 = 0x31 $$unrelocated absolute operand still reads source data$$
+assert $_test_result + 2 != $_test_expected_unrelocated $$negative control rejects destination data without fixup$$
+assert #0x031A = 0x4E $$HATABS-compatible N entry is published$$
+assert #0x031D = 0x00 $$HATABS entry remains terminated$$
