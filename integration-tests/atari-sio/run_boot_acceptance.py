@@ -29,6 +29,7 @@ RESIDENT_O65_INSTALL_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fn
 RESIDENT_O65_ALTBASE_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-o65-altbase.atr"
 RESIDENT_O65_OVERLAP_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-o65-overlap.atr"
 RESIDENT_O65_FOREIGN_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-o65-foreign.atr"
+RESIDENT_O65_OPEN_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-o65-open.atr"
 RESIDENT_APP = ROOT / "repos/nio-core-apps/build/atari/bin/fnresident.xex"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
@@ -1581,6 +1582,64 @@ def run_resident_o65_installer(timeout, evidence_dir, *, altbase=False, overlap=
                       inspector=lambda token, path: inspect_resident_o65_installer(
                           token, path, expected, requested_memlo, foreign))
 
+def inspect_resident_o65_open(token, evidence_dir):
+    """Inspect the independently loaded CIOV caller after a live N: OPEN."""
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    with AltirraBridge.from_token_file(token) as bridge:
+        install = bridge.peek(0x5400, 40)
+        probe = bridge.peek(0x5440, 8)
+        screenshot = bridge.screenshot()
+    (evidence_dir / 'resident-o65-open.json').write_text(json.dumps({
+        'installer_raw': install.hex(), 'probe_raw': probe.hex(),
+    }, indent=2) + '\n')
+    (evidence_dir / 'resident-o65-open-screen.png').write_bytes(screenshot)
+    if install[:4] != b'NRI!' or install[5] != 0:
+        raise RuntimeError('resident N: OPEN guest did not retain a successful installation')
+    if probe[:5] != b'RPR!\x03' or probe[5] != 1:
+        raise RuntimeError(f'resident CIOV OPEN did not succeed: {probe.hex()}')
+    return {'signature': 'RPR!', 'version': probe[4], 'cio_open_status': probe[5],
+            'screenshot': str(evidence_dir / 'resident-o65-open-screen.png')}
+
+def run_resident_o65_open(timeout, evidence_dir):
+    """Live NetSIO proof using the normal production NetworkDevice fixture.
+
+    This is intentionally a small assembled CIO caller, not a BASIC claim.
+    The endpoint is the existing Story 2.4 real-core fixture process.
+    """
+    if not RESIDENT_O65_OPEN_ATR.is_file():
+        raise RuntimeError(f'resident CIO OPEN ATR is missing: {RESIDENT_O65_OPEN_ATR}')
+    if not PUBLIC_API_CLOCK_ENDPOINT.is_file():
+        raise RuntimeError(f'production NetworkDevice fixture is missing: {PUBLIC_API_CLOCK_ENDPOINT}')
+    run = Path(evidence_dir) / 'netsio'
+    result = run_netsio(
+        timeout, evidence_dir=evidence_dir, trace_serial=True,
+        explicit_cold_reset=True, boot_atr=None,
+        sidecar=PUBLIC_API_CLOCK_ENDPOINT,
+        sidecar_args=('--host', '127.0.0.1', '--port', '9997',
+                      '--storage-root', str(run / 'fujinet-data')),
+        sidecar_ready='Atari public-API Clock/File/Network/Disk acceptance initialized',
+        inspector=inspect_resident_o65_open,
+        program=ROOT / 'integration-tests/atari-sio/boot-app/build/fnresident-o65-open.xex')
+    trace = (run / 'nio.log').read_text(errors='replace')
+    if trace.count('NetworkDevice routed request') != 1:
+        raise RuntimeError('resident CIOV OPEN did not dispatch exactly one real NetworkDevice request')
+    if 'NetworkDevice routed request 1 command=1' not in trace:
+        raise RuntimeError('resident CIOV OPEN did not use NetworkDevice Open')
+    if 'Resident N: fixture accepted GET open' not in trace:
+        raise RuntimeError('resident CIOV OPEN did not reach the deterministic production protocol')
+    pokey = run / 'pokey-siodata.log'
+    if not pokey.is_file() or not pokey.stat().st_size:
+        lines = [line for line in (run / 'altirra.log').read_text(errors='replace').splitlines()
+                 if '[SIODATA]' in line]
+        if lines:
+            pokey.write_text('\n'.join(lines) + '\n')
+    result['network_dispatches'] = 1
+    result['network_trace'] = str(run / 'nio.log')
+    if pokey.is_file() and pokey.stat().st_size:
+        result['pokey_trace'] = str(pokey)
+    return result
+
 def inspect_resident_foreign(token, evidence_dir):
     """Failure gate: a preceding INITAD owns N:, so nothing may be changed."""
     sys.path[:0] = [str(SDK)]
@@ -1713,14 +1772,16 @@ host=127.0.0.1
 port=9997
 ''')
 
-def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, command_ack_delay_tics=None, trace_serial=False, backend='nio', explicit_cold_reset=False, boot_atr=ATR, inspector=None):
+def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, command_ack_delay_tics=None, trace_serial=False, backend='nio', explicit_cold_reset=False, boot_atr=ATR, inspector=None, sidecar=None, sidecar_args=(), sidecar_ready=None, program=None):
     run=evidence_dir / 'netsio' if evidence_dir else Path(tempfile.mkdtemp(prefix='story13-boot-'))
     # Sidecars are launched with this directory as cwd.  Resolve it before
     # passing paths to either backend: legacy FujiNet accepts `-c`/`-s` paths
     # verbatim whereas NIO discovers its data directory relative to cwd.
     run=run.resolve(); run.mkdir(parents=True, exist_ok=True); ps=[]
     try:
-        data=run/'fujinet-data'; target=data/'boot/atari/autorun.atr'; target.parent.mkdir(parents=True); shutil.copy2(boot_atr,target)
+        data=run/'fujinet-data'; target=data/'boot/atari/autorun.atr'; target.parent.mkdir(parents=True)
+        if boot_atr is not None:
+            shutil.copy2(boot_atr,target)
         if backend == 'nio':
             (data/'fujinet.yaml').write_text('boot:\n  mode: config\n  config_uri: persist:/boot/atari/autorun.atr\n  readonly: true\nnetsio:\n  enabled: true\n  host: 127.0.0.1\n  port: 9997\n')
         elif backend == 'legacy':
@@ -1737,8 +1798,8 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         # makes every Atari STATUS request look like an absent device.
         wait_log(run/'hub.log', 'Listening for NetSIO packets on port 9997')
         if backend == 'nio':
-            ps.append(launch([str(NIO)],cwd=run,stdout=nio,stderr=subprocess.STDOUT))
-            ready_line = 'NetSIO protocol initialized'
+            ps.append(launch([str(sidecar or NIO), *sidecar_args],cwd=run,stdout=nio,stderr=subprocess.STDOUT))
+            ready_line = sidecar_ready or 'NetSIO protocol initialized'
         else:
             # Legacy NetSIO deliberately exits with 75 on an emulator cold
             # reset. Its supplied supervisor is therefore part of the normal
@@ -1753,7 +1814,7 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
             # diagnostic settle; this is stronger than transport init alone.
             wait_log(run/'nio.log', 'Applied 1 boot config mount')
             time.sleep(settle)
-        before=set(Path('/tmp').glob('altirra-bridge-*.token')); cmd,env,temps=altirra_command(False, command_ack_delay_tics, trace_serial)
+        before=set(Path('/tmp').glob('altirra-bridge-*.token')); cmd,env,temps=altirra_command(False, command_ack_delay_tics, trace_serial, program=program)
         if trace_serial:
             cmd.extend(['--debugcmd', f'.logopen {run / "pokey-siodata.log"}'])
         altirra_log=(run/'altirra.log').open('wb')
@@ -1781,7 +1842,7 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         # Legacy FujiNet groups terminal one-byte phases as DATA_BLOCK[1],
         # while NIO deliberately uses DATA_BYTE.  Preserve both raw hub logs;
         # the compact strict parser describes the NIO production contract.
-        first_trace = first_read_trace(trace) if backend == 'nio' else {
+        first_trace = first_read_trace(trace) if backend == 'nio' and boot_atr is not None else {
             'present': '31 52 01 00 84' in trace,
             'phase_grouping': 'legacy DATA_BLOCK[1] for COMPLETE/checksum',
         }
@@ -1792,7 +1853,8 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
         result['first_read_sio'] = first_trace
         # The NIO counters are intentionally production-specific; both paths
         # retain raw hub/POKEY logs for the actual protocol comparison.
-        result['trace'] = verify_netsio_trace(trace, text) if backend == 'nio' else {'backend': 'legacy'}
+        result['trace'] = (verify_netsio_trace(trace, text) if backend == 'nio' and boot_atr is not None
+                           else {'backend': backend, 'direct_program': True})
         result['backend'] = backend
         result['run_dir']=str(run); return result
     finally:
@@ -4265,12 +4327,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--resident-installer',action='store_true'); ap.add_argument('--resident-o65-installer',action='store_true'); ap.add_argument('--resident-o65-altbase',action='store_true'); ap.add_argument('--resident-o65-idempotent',action='store_true'); ap.add_argument('--resident-o65-foreign',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-reset-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--resident-installer',action='store_true'); ap.add_argument('--resident-o65-installer',action='store_true'); ap.add_argument('--resident-o65-altbase',action='store_true'); ap.add_argument('--resident-o65-idempotent',action='store_true'); ap.add_argument('--resident-o65-foreign',action='store_true'); ap.add_argument('--resident-o65-open',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-reset-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
         evidence_kind = ('atari-sio-resident-o65-foreign-' if a.resident_o65_foreign else
+                         'atari-sio-resident-o65-open-' if a.resident_o65_open else
                          'atari-sio-resident-o65-idempotent-' if a.resident_o65_idempotent else
                          'atari-sio-resident-o65-altbase-' if a.resident_o65_altbase else
                          'atari-sio-resident-o65-installer-' if a.resident_o65_installer else
@@ -4304,7 +4367,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.resident_installer, a.resident_o65_installer, a.resident_o65_altbase, a.resident_o65_idempotent, a.resident_o65_foreign, a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_reset_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.resident_installer, a.resident_o65_installer, a.resident_o65_altbase, a.resident_o65_idempotent, a.resident_o65_foreign, a.resident_o65_open, a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_reset_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -4312,7 +4375,17 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.resident_o65_installer or a.resident_o65_altbase or a.resident_o65_idempotent or a.resident_o65_foreign:
+    if a.resident_o65_open:
+        try:
+            result = run_resident_o65_open(a.timeout, evidence_dir)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.resident_o65_installer or a.resident_o65_altbase or a.resident_o65_idempotent or a.resident_o65_foreign:
         try:
             result = run_resident_o65_installer(
                 a.timeout, evidence_dir, altbase=a.resident_o65_altbase,

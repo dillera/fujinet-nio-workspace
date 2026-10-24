@@ -1,0 +1,21 @@
+memory flush
+memory load #0x4000 "build/fnresident-o65-open-control.bin"
+memory load atari "build/fnresident-o65-loader.xex"
+memory load atari "build/fnresident-o65-stage.xex"
+memory load atari "build/fnresident-o65-open-siov.xex"
+registers flush
+run #0x4000 until (#0x0680 = 0x01 OR cycle_count > 0x900000)
+assert #0x0680 = 0x01 $$resident CIO OPEN control completed$$
+assert #0x0681 = 0x01 $$first N1 OPEN succeeds through public fn_open$$
+assert #0x0682 = 0x92 $$nested foreground entry is rejected$$
+assert #0x0683 = 0x81 $$already-open IOCB is rejected locally$$
+assert #0x0684 = 0x01 $$second IOCB owns an independent public handle$$
+assert #0x0685 = 0xa1 $$third concurrent OPEN fails at the two-session bound$$
+assert #0x0686 = 0xa5 $$invalid non-N1 filename is rejected locally$$
+assert #0x0687 = 0x92 $$unsupported output mode is rejected locally$$
+assert #0x0688 = 0x00 $$every public OPEN SIOV DCB/request matched the fixture$$
+assert #0x0689 = 0x06 $$only two W/P/R public exchanges reached SIOV$$
+assert #0x068a = 0x00 $$all caller cc65 zero-page bytes were restored$$
+assert #0x068b = 0x5a $$OPEN preserves caller A$$
+assert #0x068c = 0x20 $$OPEN preserves caller X IOCB offset$$
+assert #0x068d = 0xff $$OPEN returns with the caller CPU stack depth$$

@@ -268,6 +268,43 @@ Physical SIO timing/electrical validation (Epic 3), legacy FujiNet `N:`
 protocols or device IDs, PROC delivery, BASIC `N:` compatibility beyond the
 defined supported URI/modes, and a transport or NetworkDevice redesign.
 
+## Increment 3 implementation evidence — resident CIO gateway and OPEN
+
+- `fnresident-module.o65` now contains the six-vector HATABS table in loaded
+  DATA (not an omitted linker-only RODATA segment), an assembly foreground
+  gateway, and the bounded C OPEN adapter.  The gateway captures the CIO IOCB
+  offset, saves/restores cc65 `$82-$9b`, selects its resident C stack, preserves
+  the caller's A/X and 6502 stack depth, and returns the CIO result in Y.
+  Re-entry while a public call is active returns named `FNCNOT` (`$92`) before
+  touching saved caller state.
+- OPEN accepts only `N1:<nonempty URI>` and CIO `OPNIN=$04`.  It strips exactly
+  `N1:`, bounds URI traversal by `FN_MAX_URL_LEN`, and calls public
+  `fn_open(..., FN_METHOD_GET, ...)`; it constructs neither SIO/DCB nor
+  FujiBus data.  Two resident `{active, IOCB offset, fn_handle_t}` records map
+  the archive's two-session limit.  Duplicate IOCB is `PRVOPN=$81`; third
+  active IOCB/local exhaustion is `TMOF=$a1`; malformed names are
+  `INVFNM=$a5`; invalid IOCB is `BADIOC=$86`; unsupported modes and unsafe
+  re-entry are `FNCNOT=$92`; public Open failures are `DERROR=$90`.
+  CLOSE remains deliberately unsupported this increment, so ownership persists
+  for the installed handler lifetime; explicit close/reset ownership lifecycle
+  is deferred with GET/PUT/STATUS.
+- `make test-resident-o65` executes assembled production `fn_transport` and
+  relocated handler through intercepted SIOV.  It verifies complete two URI
+  Open packets (including checksum), each W/P/R DCB sequence, two distinct
+  IOCB owners, third-open no-traffic failure, duplicate/malformed/mode errors,
+  nested call rejection, and complete caller ZP/A/X/CPU-stack restoration.
+- Live evidence `test-evidence/atari-sio-resident-o65-open-20261024-222340`
+  is a separately loaded assembled CIOV caller, not BASIC acceptance.  Its
+  result is `RPR!`, version 3, CIO status `$01`; the captured production log
+  records exactly one `NetworkDevice ... command=1` and the real registered
+  `fixture://resident-open` GET protocol acceptance.  The same o65 payload is
+  used; the configuration-ATR artifact is built as the deployment pipeline,
+  while this focused live check deliberately launches the composite XEX to
+  isolate the CIO operation from D1 boot configuration.
+- Current module map: CODE 5,145; RODATA 16; DATA 27; BSS 1,147; initialized
+  5,188; resident allocation 6,335 plus 256-byte private cc65 C stack.  The
+  established footprint gate remains capped at initialized 5,202/BSS 1,147.
+
 ## Resident relocation feasibility report
 
 This is a focused architecture investigation.  It adds no production
