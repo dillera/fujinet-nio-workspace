@@ -628,9 +628,9 @@ foreign entry is left untouched.
 | permanent allocation at MEMLO `$0700` | `$0700-$36ad` (`MEMLO=$36ae`, 12,206 bytes) |
 | permanent allocation at MEMLO `$0702` | `$0702-$36af` (`MEMLO=$36b0`) |
 | observed free range below `$941f` stack floor | 23,921 / 23,919 bytes respectively |
-| transient loader / staged FNR1 / probe | `$3800-$3f7d` (1,918 bytes) / `$5800-$924d` (14,926 bytes) / `$4000-$4123` (292 bytes) |
+| transient loader / staged FNR1 / probe | `$3800-$3f7d` (1,918 bytes) / `$4300-$8292` (16,275 bytes) / `$4000-$4123` (292 bytes) |
 
-The installer result is transient at `$5400`; it is explicitly outside the
+The installer result is transient at `$8300`; it is explicitly outside the
 resident interval.  The loader and the probe are both above the target range.
 MyPicoDOS demonstrably continues using low RAM after an `INITAD` routine, so
 the configuration-ATR composition first loads the staged module and the
@@ -747,3 +747,40 @@ Fresh live evidence is retained at:
 - `test-evidence/atari-sio-boot-20261024-214919/` — the deterministic D1
   regression reached `NIO!` through both the native control and production
   NetSIO path; its D1 service counters and first-read traffic remain present.
+
+## Increment: resident CIO GET and CLOSE
+
+The relocated handler now implements GET and CLOSE exclusively through public
+`fn_read()` and `fn_close()`. Each of the two owned IOCBs has a 128-byte
+resident read cache, current offset and EOF marker. GET refills only an empty
+cache, returns its byte in A and CIO status in Y, and reports `EOFERR` after
+the final EOF-marked cache byte. CLOSE releases both the public handle and its
+resident ownership/cache record even when the public close exchange reports an
+error, so a later OPEN can reuse the IOCB slot. PUT, STATUS and SPECIAL remain
+the explicitly unsupported stubs.
+
+The larger public closure exposed a loader defect: staging at `$4300` put the
+o65 source over the old transient result window at `$5400`; result writes were
+corrupting the source before relocation. The result record moved to `$8300`,
+the image packer rejects a staged image that reaches that window, and the
+loader now takes relocation bases from its immutable recorded allocation
+start. `fnresident_o65_relocation_compare` executes the production Atari-side
+loader and compares all relocated TEXT bytes to the independent o65 reference
+image; it would fail at the former first mismatch (the WORD/BSS relocation at
+TEXT offset `$0003`).
+
+Executed evidence:
+
+- `make -C integration-tests/atari-sio/boot-app test-resident-o65` — loader
+  lifecycle, byte-level relocation, existing OPEN ownership checks, and the
+  new real-6502 GET/CLOSE fixture pass. The new fixture checks five exact
+  public exchanges (Open, Read, Close, Open, Close), DCB command/direction/
+  count/AUX fields, `Q`/`R` cache bytes, EOF, register/ZP restoration and IOCB
+  reuse.
+- `test-evidence/atari-sio-resident-o65-open-20261024-232250/netsio/` — an
+  independently loaded CIOV caller returned `RPR!` v4 with GET bytes `N`,`E`,
+  and production NetworkDevice dispatches Open/Read/Close/Open/Close exactly
+  once each through NetSIO.
+- `make -C repos/fujinet-nio-lib check` passed, including the assembled Atari
+  transport suite. The D1 boot regression was re-run separately with retained
+  evidence; it remains a distinct boot gate.

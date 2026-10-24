@@ -65,8 +65,13 @@ def main() -> int:
     ap.add_argument("--output", required=True, type=Path)
     ap.add_argument("--cstack", type=lambda text: int(text, 0), default=DEFAULT_CSTACK)
     ap.add_argument("--stage", type=lambda text: int(text, 0))
+    ap.add_argument("--max-stage-end", type=lambda text: int(text, 0),
+                    help="exclusive ceiling for a staged image")
     ns = ap.parse_args()
     image = package(ns.module.read_bytes(), ns.labels, ns.cstack)
+    if ns.stage is not None and ns.max_stage_end is not None:
+        if ns.stage + len(image) > ns.max_stage_end:
+            raise ValueError("staged resident image overlaps its reserved transient region")
     ns.output.write_bytes(xex_segment(ns.stage, image) if ns.stage is not None else image)
     print(f"FNR1 resident image: module={len(image) - HEADER_SIZE} initialized="
           f"{struct.unpack_from('<H', image, 16)[0]} allocation={struct.unpack_from('<H', image, 14)[0]} "

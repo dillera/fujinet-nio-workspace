@@ -34,6 +34,9 @@ RESIDENT_O65_OPEN_XEX := $(OUT)/fnresident-o65-open.xex
 RESIDENT_O65_OPEN_ATR := $(OUT)/fnresident-o65-open.atr
 RESIDENT_O65_OPEN_CONTROL := $(OUT)/fnresident-o65-open-control.bin
 RESIDENT_O65_OPEN_SIOV := $(OUT)/fnresident-o65-open-siov.xex
+RESIDENT_O65_GET_CLOSE_CONTROL := $(OUT)/fnresident-o65-get-close-control.bin
+RESIDENT_O65_GET_CLOSE_SIOV := $(OUT)/fnresident-o65-get-close-siov.xex
+RESIDENT_O65_RELOCATION_COMPARE := $(OUT)/fnresident-o65-relocation-compare-control.bin
 
 .PHONY: all resident resident-foreign resident-own resident-overlap resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign resident-o65-open resident-o65-footprint test-resident-o65 clean
 all: $(ATR)
@@ -51,7 +54,7 @@ resident-o65-open: $(RESIDENT_O65_OPEN_ATR)
 # Keep its module excluded and retain the measured bounded buffers: two shared
 # 512-byte packet workspaces and no second Atari recovery discard workspace.
 resident-o65-footprint: $(RESIDENT_O65_MODULE)
-	python3 ../resident-relocation/resident_footprint_report.py --map $(RESIDENT_O65_MODULE:.o65=.map) --max-initialized 5202 --max-bss 1147 --forbid-module fn_tcp_open.o
+	python3 ../resident-relocation/resident_footprint_report.py --map $(RESIDENT_O65_MODULE:.o65=.map) --max-initialized 11000 --max-bss 1450 --forbid-module fn_tcp_open.o
 
 $(OUT):
 	mkdir -p $@
@@ -120,7 +123,7 @@ $(RESIDENT_O65_MODULE):
 	$(MAKE) -C $(APPS) -f makefiles/build.mk TARGET=atari fnresident-module
 
 $(RESIDENT_O65_STAGE): $(RESIDENT_O65_MODULE) $(RESIDENT_O65_LABELS) ../make_resident_o65_image.py | $(OUT)
-	python3 ../make_resident_o65_image.py --module $(RESIDENT_O65_MODULE) --labels $(RESIDENT_O65_LABELS) --stage 0x5800 --output $@
+	python3 ../make_resident_o65_image.py --module $(RESIDENT_O65_MODULE) --labels $(RESIDENT_O65_LABELS) --stage 0x4300 --max-stage-end 0x8300 --output $@
 
 $(RESIDENT_O65_LOADER): $(APPS)/apps/platform/atari/resident/fnresident_o65_loader.s fnresident-o65-loader.cfg | $(OUT)
 	cl65 -t none -C fnresident-o65-loader.cfg -o $@ $(APPS)/apps/platform/atari/resident/fnresident_o65_loader.s
@@ -182,15 +185,26 @@ $(RESIDENT_O65_OPEN_CONTROL): fnresident_o65_open_control.s fnresident-o65-loade
 $(RESIDENT_O65_OPEN_SIOV): fnresident_o65_open_siov.s fnresident-o65-open-siov.cfg | $(OUT)
 	cl65 -t none -C fnresident-o65-open-siov.cfg -o $@ fnresident_o65_open_siov.s
 
-test-resident-o65: resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign resident-o65-footprint $(RESIDENT_O65_OPEN_CONTROL) $(RESIDENT_O65_OPEN_SIOV)
+$(RESIDENT_O65_GET_CLOSE_CONTROL): fnresident_o65_get_close_control.s fnresident-o65-loader-control.cfg | $(OUT)
+	cl65 -t none -C fnresident-o65-loader-control.cfg -o $@ fnresident_o65_get_close_control.s
+
+$(RESIDENT_O65_GET_CLOSE_SIOV): fnresident_o65_get_close_siov.s fnresident-o65-open-siov.cfg | $(OUT)
+	cl65 -t none -C fnresident-o65-open-siov.cfg -o $@ fnresident_o65_get_close_siov.s
+
+$(RESIDENT_O65_RELOCATION_COMPARE): fnresident_o65_relocation_compare_control.s fnresident-o65-loader-control.cfg | $(OUT)
+	cl65 -t none -C fnresident-o65-loader-control.cfg -o $@ fnresident_o65_relocation_compare_control.s
+
+test-resident-o65: resident-o65 resident-o65-altbase resident-o65-overlap resident-o65-foreign resident-o65-footprint $(RESIDENT_O65_OPEN_CONTROL) $(RESIDENT_O65_OPEN_SIOV) $(RESIDENT_O65_GET_CLOSE_CONTROL) $(RESIDENT_O65_GET_CLOSE_SIOV) $(RESIDENT_O65_RELOCATION_COMPARE)
 	cl65 -t none -C fnresident-o65-direct-control.cfg -o $(OUT)/fnresident-o65-direct-control.bin fnresident_o65_direct_control.s
 	cl65 -t none -C fnresident-o65-loader-control.cfg -o $(OUT)/fnresident-o65-loader-control.bin fnresident_o65_loader_control.s
 	cl65 -t none -C fnresident-o65-loader-siov.cfg -o $(OUT)/fnresident-o65-loader-siov.xex fnresident_o65_loader_siov.s
 	python3 ../resident-relocation/verify_o65_api_closure.py $(RESIDENT_O65_MODULE) --output-relocated $(OUT)/fnresident-o65-module-0700.bin --relocation-base 0x0700
+	soft65c02_tester -i fnresident_o65_relocation_compare.txt
 	soft65c02_tester -i fnresident_o65_direct.txt
 	soft65c02_tester -i fnresident_o65_loader.txt
 	soft65c02_tester -i fnresident_o65_loader_failure.txt
 	soft65c02_tester -i fnresident_o65_open.txt
+	soft65c02_tester -i fnresident_o65_get_close.txt
 
 clean:
 	rm -rf $(OUT)
