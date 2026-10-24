@@ -21,6 +21,7 @@ from fnaccept_memory_layout import layout_report, validate_runtime_snapshot
 
 ROOT = Path(__file__).resolve().parents[2]
 ATR = ROOT / "integration-tests/atari-sio/boot-app/build/boot-acceptance.atr"
+RESIDENT_INSTALL_ATR = ROOT / "integration-tests/atari-sio/boot-app/build/fnresident-install.atr"
 NATIVE_CORE_DISPATCH_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-core-dispatch.xex"
 NATIVE_WRONG_R_RETENTION_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-wrong-r-retention.xex"
 NATIVE_RESET_TO_IDLE_XEX = ROOT / "integration-tests/atari-sio/native-projection-app/build/native-reset-to-idle.xex"
@@ -1398,6 +1399,61 @@ def cleanup_temps(temps):
         if tmp:
             tmp.cleanup()
 
+def _u16(raw, offset):
+    return raw[offset] | (raw[offset + 1] << 8)
+
+def inspect_resident_installer(token, evidence_dir):
+    """Inspect the installer and separately loaded probe in live Atari RAM."""
+    sys.path[:0] = [str(SDK)]
+    from altirra_bridge import AltirraBridge
+    with AltirraBridge.from_token_file(token) as bridge:
+        install = bridge.peek(0x0b00, 40)
+        probe = bridge.peek(0x0b40, 8)
+        hatabs = bridge.peek(0x031a, 35)
+        memlo = bridge.peek16(0x02e7)
+        screenshot = bridge.screenshot()
+    (evidence_dir / 'resident-installation.json').write_text(json.dumps({
+        'installer_raw': install.hex(), 'probe_raw': probe.hex(),
+        'hatabs_raw': hatabs.hex(), 'memlo': memlo,
+    }, indent=2) + '\n')
+    (evidence_dir / 'resident-screen.png').write_bytes(screenshot)
+    if install[:4] != b'NRI!' or install[4] != 1:
+        raise RuntimeError('resident installer did not publish its versioned result')
+    if install[5] not in (0, 1) or install[6] != 0:
+        raise RuntimeError(f'resident installer failed: outcome={install[5]} init={install[6]}')
+    if probe[:4] != b'RPR!' or probe[4] != 1 or probe[5] != 0:
+        raise RuntimeError('separately loaded resident probe did not validate retained handler state')
+    if memlo != _u16(install, 10):
+        raise RuntimeError('MEMLO changed after resident installation')
+    resident_start, resident_end = _u16(install, 12), _u16(install, 14)
+    memtop, stack_floor = _u16(install, 16), _u16(install, 18)
+    sdlstl, savmsc = _u16(install, 20), _u16(install, 22)
+    if not (resident_start < resident_end <= stack_floor <= memtop < sdlstl <= savmsc):
+        raise RuntimeError('resident range does not satisfy runtime memory bounds')
+    offset = install[24]
+    if offset >= 35 or hatabs[offset] != ord('N'):
+        raise RuntimeError('resident N: HATABS entry is stale')
+    table = _u16(install, 26)
+    if _u16(hatabs, offset + 1) != table:
+        raise RuntimeError('resident N: HATABS table pointer changed')
+    vectors = [_u16(install, 28 + index * 2) + 1 for index in range(6)]
+    if any(vector < resident_start or vector >= resident_end for vector in vectors):
+        raise RuntimeError('resident CIO vector escapes the protected image')
+    return {
+        'signature': 'RPR!', 'installer_outcome': install[5],
+        'old_memlo': _u16(install, 8), 'new_memlo': memlo,
+        'resident_start': resident_start, 'resident_end': resident_end,
+        'handler_table': table, 'vectors': vectors,
+        'screenshot': str(evidence_dir / 'resident-screen.png'),
+    }
+
+def run_resident_installer(timeout, evidence_dir):
+    if not RESIDENT_INSTALL_ATR.is_file():
+        raise RuntimeError(f'resident installer ATR is missing: {RESIDENT_INSTALL_ATR}')
+    return run_netsio(timeout, evidence_dir=evidence_dir, trace_serial=True,
+                      explicit_cold_reset=True, boot_atr=RESIDENT_INSTALL_ATR,
+                      inspector=inspect_resident_installer)
+
 def run_native(timeout, evidence_dir=None, observe=False):
     before=set(Path('/tmp').glob('altirra-bridge-*.token')); cmd,env,temps=altirra_command(True)
     p=launch(cmd,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -1434,14 +1490,14 @@ host=127.0.0.1
 port=9997
 ''')
 
-def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, command_ack_delay_tics=None, trace_serial=False, backend='nio', explicit_cold_reset=False):
+def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, command_ack_delay_tics=None, trace_serial=False, backend='nio', explicit_cold_reset=False, boot_atr=ATR, inspector=None):
     run=evidence_dir / 'netsio' if evidence_dir else Path(tempfile.mkdtemp(prefix='story13-boot-'))
     # Sidecars are launched with this directory as cwd.  Resolve it before
     # passing paths to either backend: legacy FujiNet accepts `-c`/`-s` paths
     # verbatim whereas NIO discovers its data directory relative to cwd.
     run=run.resolve(); run.mkdir(parents=True, exist_ok=True); ps=[]
     try:
-        data=run/'fujinet-data'; target=data/'boot/atari/autorun.atr'; target.parent.mkdir(parents=True); shutil.copy2(ATR,target)
+        data=run/'fujinet-data'; target=data/'boot/atari/autorun.atr'; target.parent.mkdir(parents=True); shutil.copy2(boot_atr,target)
         if backend == 'nio':
             (data/'fujinet.yaml').write_text('boot:\n  mode: config\n  config_uri: persist:/boot/atari/autorun.atr\n  readonly: true\nnetsio:\n  enabled: true\n  host: 127.0.0.1\n  port: 9997\n')
         elif backend == 'legacy':
@@ -1507,7 +1563,7 @@ def run_netsio(timeout, evidence_dir=None, settle=0.0, capture_dcb=False, comman
             'phase_grouping': 'legacy DATA_BLOCK[1] for COMPLETE/checksum',
         }
         (run / 'first-read-sio.json').write_text(json.dumps(first_trace, indent=2) + '\n')
-        result=inspect_launch(token, run)
+        result=(inspector(token, run) if inspector else inspect_launch(token, run))
         if dcb_trace:
             result['first_read_dcb'] = dcb_trace
         result['first_read_sio'] = first_trace
@@ -3986,12 +4042,13 @@ def write_altirra_embedded_native_capacity_bounds_projection(run_result):
     return result
 
 if __name__=='__main__':
-    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-reset-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
+    ap=argparse.ArgumentParser(); ap.add_argument('--timeout',type=float,default=20); ap.add_argument('--observe-native',action='store_true'); ap.add_argument('--native-only',action='store_true'); ap.add_argument('--resident-installer',action='store_true'); ap.add_argument('--public-api-clock',action='store_true'); ap.add_argument('--public-api-clock-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-reset-recovery-altirra-embedded',action='store_true'); ap.add_argument('--public-api-rejected-w-recovery',action='store_true'); ap.add_argument('--public-api-malformed-r-recovery',action='store_true'); ap.add_argument('--public-api-interrupted-r-recovery',action='store_true'); ap.add_argument('--public-api-reset-recovery',action='store_true'); ap.add_argument('--native-core-dispatch',action='store_true'); ap.add_argument('--native-core-dispatch-altirra-embedded',action='store_true'); ap.add_argument('--native-wrong-r-retention',action='store_true'); ap.add_argument('--native-wrong-r-retention-altirra-embedded',action='store_true'); ap.add_argument('--native-reset-to-idle',action='store_true'); ap.add_argument('--native-reset-to-idle-altirra-embedded',action='store_true'); ap.add_argument('--native-interrupted-r-recovery',action='store_true'); ap.add_argument('--native-interrupted-r-recovery-altirra-embedded',action='store_true'); ap.add_argument('--native-capacity-bounds',action='store_true'); ap.add_argument('--native-capacity-bounds-altirra-embedded',action='store_true'); ap.add_argument('--write-evidence',action='store_true'); ap.add_argument('--evidence-dir', type=Path); ap.add_argument('--json', action='store_true'); ap.add_argument('--settle', type=float, default=0.0); ap.add_argument('--repeat', type=int, default=1); ap.add_argument('--capture-dcb', action='store_true'); ap.add_argument('--command-ack-delay-tics', type=int); ap.add_argument('--trace-serial',action='store_true'); ap.add_argument('--write-projection-results', action='store_true'); ap.add_argument('--backend', choices=('nio', 'legacy'), default='nio'); ap.add_argument('--explicit-cold-reset', dest='explicit_cold_reset', action='store_true', default=True); ap.add_argument('--no-explicit-cold-reset', dest='explicit_cold_reset', action='store_false'); a=ap.parse_args()
     def emit(value):
         print(json.dumps(value) if a.json else value)
     evidence_dir = a.evidence_dir
     if evidence_dir is None and not a.observe_native:
-        evidence_kind = ('atari-sio-public-api-reset-recovery-altirra-embedded-' if a.public_api_reset_recovery_altirra_embedded else
+        evidence_kind = ('atari-sio-resident-installer-' if a.resident_installer else
+                         'atari-sio-public-api-reset-recovery-altirra-embedded-' if a.public_api_reset_recovery_altirra_embedded else
                          'atari-sio-public-api-interrupted-r-recovery-altirra-embedded-' if a.public_api_interrupted_r_recovery_altirra_embedded else
                          'atari-sio-public-api-malformed-r-recovery-altirra-embedded-' if a.public_api_malformed_r_recovery_altirra_embedded else
                          'atari-sio-public-api-rejected-w-recovery-altirra-embedded-' if a.public_api_rejected_w_recovery_altirra_embedded else
@@ -4020,7 +4077,7 @@ if __name__=='__main__':
         raise ValueError('--write-projection-results requires --trace-serial for required POKEY evidence')
     if a.write_projection_results and a.backend != 'nio':
         raise ValueError('--write-projection-results only records the production netsio adapter')
-    if sum((a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_reset_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
+    if sum((a.resident_installer, a.public_api_clock, a.public_api_clock_altirra_embedded, a.public_api_rejected_w_recovery_altirra_embedded, a.public_api_malformed_r_recovery_altirra_embedded, a.public_api_interrupted_r_recovery_altirra_embedded, a.public_api_reset_recovery_altirra_embedded, a.public_api_rejected_w_recovery, a.public_api_malformed_r_recovery, a.public_api_interrupted_r_recovery, a.public_api_reset_recovery, a.native_core_dispatch, a.native_core_dispatch_altirra_embedded,
             a.native_reset_to_idle_altirra_embedded,
             a.native_interrupted_r_recovery_altirra_embedded,
             a.native_capacity_bounds_altirra_embedded,
@@ -4028,7 +4085,17 @@ if __name__=='__main__':
             a.native_wrong_r_retention, a.native_reset_to_idle,
             a.native_interrupted_r_recovery, a.native_capacity_bounds)) > 1:
         raise ValueError('choose only one native projection')
-    if a.public_api_reset_recovery_altirra_embedded:
+    if a.resident_installer:
+        try:
+            result = run_resident_installer(a.timeout, evidence_dir)
+            result['outcome'] = 'launch'
+        except Exception as exc:
+            result = {'outcome': 'failure', 'evidence_dir': str(evidence_dir), 'error': str(exc)}
+        (evidence_dir / 'result.json').write_text(json.dumps(result, indent=2) + '\n')
+        emit(result)
+        if result['outcome'] != 'launch':
+            raise SystemExit(1)
+    elif a.public_api_reset_recovery_altirra_embedded:
         try:
             result = run_altirra_embedded_public_api_clock(a.timeout, evidence_dir, reset_recovery=True)
             result['outcome'] = 'launch'

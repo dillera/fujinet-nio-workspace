@@ -80,6 +80,30 @@ emulator runner, or treat virtual results as physical-SIO proof.
   evidence is retained at
   `test-evidence/atari-sio-boot-20261024-093602`.
 
+## Increment 1 implementation evidence
+
+- `repos/nio-core-apps` now builds `fnresident.xex` as a dedicated `$1d00`
+  image with the real Atari archive and an explicit resident linker map.  The
+  image reserves every linked CODE/RODATA/DATA/BSS byte through MEMLO; the
+  current measured range is `$1d00-$2eca`, below the live `$941f` cc65-stack
+  floor and the Graphics-0 display allocation.
+- The installer calls `fn_init()` before changing HATABS, checks an existing
+  `N:` entry by its table pointer, never replaces a foreign entry, and publishes
+  MEMLO before the three-byte HATABS entry.  Its six address-minus-one vectors
+  are deterministic CIO ABI stubs: X remains the IOCB offset, GET returns an
+  A byte, and unsupported operations return the checked-in Atari OS `FNCNOT`
+  (`$92`) status in Y.  `SUCCES=$01` and `FNCNOT=$92` are the only CIO status
+  constants frozen in this increment.
+- The existing ATR builder stages a composite executable whose installer runs
+  as the genuine DOS `INITAD` phase and whose separately linked `$4000` probe
+  is then loaded by DOS.  The probe verifies retained installer bytes, MEMLO,
+  the N: HATABS entry/table, all six in-range handler vectors, and an actual
+  call to the OPEN stub after the installer has returned.  The live NetSIO
+  evidence is `test-evidence/atari-sio-resident-installer-20261024-101202`.
+- `fnresident_memory_layout.py` and its unit test reject malformed maps;
+  runtime inspection rejects stale vectors, changed MEMLO, missing N:, a
+  failed initializer, or a resident range overlapping stack/display memory.
+
 ## Code Map
 
 - `repos/cc65/include/_atarios.h:69-131` and
