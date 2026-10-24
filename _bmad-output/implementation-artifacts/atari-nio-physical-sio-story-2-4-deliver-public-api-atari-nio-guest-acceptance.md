@@ -465,10 +465,8 @@ Verification performed:
   `test-evidence/atari-sio-boot-20261023-202642/` (`NIO!` for native and
   NetSIO).
 
-At that increment's completion, malformed/wrong-length R,
-accepted-but-interrupted R, device-reset recovery, conditional PROC, and
-embedded-Altirra public-service acceptance were still pending; later sections
-record the completed recovery increments.  Story 2.4 remains open.
+Subsequent sections record the completed recovery increments, capability
+reporting, and embedded-Altirra public-service acceptance.
 
 ## Memory-layout investigation and hardening
 
@@ -705,9 +703,6 @@ Live evidence:
 - `test-evidence/atari-sio-boot-20261023-222432/` freshly preserves the D1
   page-6 `NIO!` native and production-NetSIO gate after this increment.
 
-Story 2.4 remains open: PROC and embedded public-service acceptance are still
-separate increments.
-
 ## Production NetSIO reset recovery
 
 `NetSioPublicResetRelay` establishes a deterministic carrier-only checkpoint:
@@ -739,8 +734,6 @@ Live evidence:
   records `ADP!`, one original and one distinct File Write dispatch, 28
   observed post-reset R/NAK pairs, P(IDLE) before the distinct W, literal FF
   ingress evidence, and separately inspected original/recovery backing files.
-
-Story 2.4 remains open only for embedded public-service acceptance.
 
 ## Public capability discovery and optional PROC reporting
 
@@ -875,9 +868,6 @@ Fresh evidence:
   `embedded-public-rejected-w-fault.json` binding every physical NAK to its
   delivered bad checksum.
 
-At that increment, embedded malformed-length-R, accepted-but-interrupted R,
-and reset recovery remained deferred.
-
 ### Embedded malformed-length terminal-R retention
 
 The embedded public-acceptance composition now also has the mutually exclusive,
@@ -910,9 +900,6 @@ Fresh evidence:
 - `test-evidence/atari-sio-public-api-malformed-r-recovery-altirra-embedded-20261024-001239/`
   contains POKEY/Altirra logs, screenshot, guest inspection, both File backing
   stores, Disk inspection and `embedded-public-malformed-r-fault.json`.
-
-At that increment, embedded accepted-but-interrupted terminal-R and reset
-recovery remained deferred.
 
 ### Embedded accepted-but-interrupted terminal-R recovery
 
@@ -954,8 +941,6 @@ Fresh evidence:
   `embedded-public-interrupted-r-fault.json` binding the accepted endpoint R
   to the corrupted downstream delivery and post-consumption IDLE.
 
-Story 2.4 remains open: embedded reset recovery is still deferred.
-
 ### Embedded device-reset recovery
 
 The embedded public fixture now has the mutually exclusive test-only
@@ -971,8 +956,6 @@ PROC not-advertised, Graphics 0/memory checks, heartbeat and `ADP!` pass.
 Fresh evidence:
 
 - `test-evidence/atari-sio-public-api-reset-recovery-altirra-embedded-20261024-011136/`
-
-Story 2.4 remains open for the final cross-adapter audit only.
 
 ## Final cross-adapter acceptance audit (2026-10-24)
 
@@ -1019,26 +1002,6 @@ endpoint, service fixture or boot pipeline contributes acceptance evidence.
 **Verdict: done.**  The only remaining limitation is deliberate scope: this is
 virtual NetSIO/Altirra evidence, not physical-SIO timing or electrical proof
 (Epic 3), and it does not include BASIC `N:` work (Story 2.5).
-
-### Approved current increment: embedded device-reset recovery
-
-The completed embedded reset increment extended only the existing public-
-acceptance path.  After the original side-effecting File W is accepted and real
-P(READY) has exposed its retained response—but before terminal R—the embedded
-SIO scheduling trigger invokes the actual installed FujiNet-NIO device's
-`ColdReset()` lifecycle.  The Atari CPU, OS and guest stay running; no direct frontend reset,
-fabricated NAK, guest-memory error injection or guest reset is permitted.
-
-The run must observe the actual lifecycle reset and prove original File
-Write/persistence exactly once, terminal-R failure and real physical R/NAK
-retries, followed by P(IDLE) before a distinct recovery W (no stale R drain or
-automatic replay).  The recovery File Write/Read must persist its separate
-marker exactly once.  Capture POKEY command/data/control/checksum bytes,
-Altirra reset diagnostics, guest result/status and memory/Graphics-0 checks,
-core dispatch ordering/counts, screenshot and both backing files.  Add focused
-negative checks for a missing or late reset, stale READY, successful R,
-original-W replay, W before IDLE, wrong dispatch counts and missing backing
-effects.  Preserve all previous public and Story 2.3 modes.
 
 ## Out of scope
 
