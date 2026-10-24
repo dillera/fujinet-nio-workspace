@@ -1188,91 +1188,6 @@ def cold_reset_after_device_ready(token):
         b.cold_reset()
 
 
-def reset_embedded_after_public_file_ready(bridge, timeout):
-    """Cold-reset the embedded device after the original File P(READY).
-
-    The public guest deliberately owns no SIO framing, so its ``fn_raw_call``
-    cannot provide a test pause between the library's P and R.  Instead, use
-    the real Atari OS SIOV boundary: stop at the original File P call, then at
-    that call's return address after the three READY bytes are in the DCB
-    buffer.  The Atari CPU remains paused there while the bridge performs the
-    device's actual ColdReset; resuming lets the unmodified library issue its
-    normal terminal R against the reset production endpoint.
-    """
-    siov_bp = bridge.bp_set(0xE459)
-    deadline = time.monotonic() + timeout
-    saw_initial_file_write = False
-    samples = []
-    try:
-        while time.monotonic() < deadline:
-            bridge.cycles(10_000_000)
-            clock = bridge.clock()
-            raw_dcb = bridge.peek(0x0300, 12)
-            dcb = decode_dcb(raw_dcb)
-            regs = bridge.regs()
-            sample = {'clock': clock, 'dcb': dcb, 'pc': regs['PC']}
-            samples.append(sample)
-
-            # The public File helper supplies an application payload; the
-            # backend's W carries that payload plus the six-byte FujiBus
-            # packet header (the literal SIO command is 7f 57 36 00 0d).
-            if (dcb['device'] == '0x7f' and dcb['command'] == '0x57' and
-                    dcb['aux'] == PUBLIC_API_FILE_WRITE_PAYLOAD_BYTES + 6):
-                saw_initial_file_write = True
-            if not (saw_initial_file_write and dcb['device'] == '0x7f' and
-                    dcb['command'] == '0x50' and dcb['aux'] == 0):
-                bridge.resume()
-                continue
-
-            # SIOV is entered via JSR.  The stacked return address is one
-            # byte before the first caller instruction after SIOV.
-            stack = int(regs['S'].replace('$', '0x'), 0)
-            raw_return = bridge.peek(0x0100 + stack + 1, 2)
-            return_pc = (raw_return[0] | (raw_return[1] << 8)) + 1
-            bridge.bp_clear(siov_bp)
-            siov_bp = None
-            return_bp = bridge.bp_set(return_pc)
-            try:
-                bridge.cycles(10_000_000)
-                return_clock = bridge.clock()
-                returned_dcb = decode_dcb(bridge.peek(0x0300, 12))
-                buffer = int(returned_dcb['buffer'], 16)
-                ready = bridge.peek(buffer, 3)
-                if ready != b'\x02\x11\x00':
-                    raise RuntimeError(
-                        'embedded public reset checkpoint did not expose the '
-                        f'original File P(READY): {ready.hex(" ")}')
-                reset_event = bridge.device_cold_reset('fujinetnio')
-                if (not reset_event.get('reset') or reset_event.get('lifecycle') != 'cold' or
-                        reset_event.get('tag') != 'fujinetnio' or
-                        reset_event.get('path') != '/fujinetnio'):
-                    raise RuntimeError(
-                        f'embedded device cold reset was not acknowledged: {reset_event}')
-                reset_event['ready_checkpoint'] = {
-                    'siov_entry': sample,
-                    'siov_return_clock': return_clock,
-                    'siov_return_dcb': returned_dcb,
-                    'ready_bytes': ready.hex(' '),
-                    'return_pc': f'0x{return_pc:04x}',
-                    'preceding_siov': samples[:-1],
-                }
-                # Preserve a failing guest's result block long enough for the
-                # runner to inspect it instead of immediately returning to
-                # the boot ATR and overwriting the diagnostic RAM region.
-                # This is a diagnostic execution stop only; it neither
-                # changes the guest nor fakes an SIO outcome.
-                reset_event['guest_exit_breakpoint'] = bridge.bp_set(0x0d41)
-                return reset_event
-            finally:
-                bridge.bp_clear(return_bp)
-        raise RuntimeError(
-            'did not observe the original public File P(READY) SIOV checkpoint; '
-            f'last samples={samples[-8:]}')
-    finally:
-        if siov_bp is not None:
-            bridge.bp_clear(siov_bp)
-        bridge.resume()
-
 def capture_first_boot_read(token):
     """Pause at the OS SIO vector and record the actual first D1 READ DCB.
 
@@ -3116,9 +3031,20 @@ def run_altirra_embedded_public_api_clock(timeout, evidence_dir, rejected_w_reco
             pokey, rejected_w_recovery=rejected_w_recovery,
             malformed_r_recovery=malformed_r_recovery,
             interrupted_r_recovery=interrupted_r_recovery)
-            if not reset_recovery else [])
+            if not reset_recovery else [
+                {'command': command.hex(' '),
+                 'sent': bytes(int(value, 16) for value in re.findall(
+                     r"\bSend\s+\$([0-9A-F]{2})", pokey[begin:end])).hex(' '),
+                 'received': bytes(int(value, 16) for value in re.findall(
+                     r"Receive\s+< \$([0-9A-F]{2})", pokey[begin:end])).hex(' ')}
+                for command, begin, end in _embedded_native_windows(pokey)])
         state['capability_wire'] = (state['native_observations'][0]
                                     if state['native_observations'] else None)
+        if reset_recovery and state['capability_wire'] != {
+                'command': '7f 51 00 00 d0', 'sent': '',
+                'received': ('41 43 ' + PUBLIC_API_CAPABILITY_REPLY.hex(' ') +
+                             f' {_sio_checksum(PUBLIC_API_CAPABILITY_REPLY):02x}')}:
+            raise RuntimeError('embedded public reset capture lacks the literal Q capability exchange')
         _validate_embedded_public_core_log(trace,
                                            retained_ready_recovery=(malformed_r_recovery or
                                                                      interrupted_r_recovery or reset_recovery))

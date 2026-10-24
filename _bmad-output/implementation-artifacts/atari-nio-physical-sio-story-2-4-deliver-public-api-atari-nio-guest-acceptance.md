@@ -4,7 +4,7 @@ feature: 'atari-nio-physical-sio'
 story: '2.4'
 type: 'feature'
 created: '2026-10-23'
-status: 'in-progress'
+status: 'done'
 baseline_workspace_commit: '204887e1'
 baseline_commit: '35c3e71c'
 context:
@@ -974,13 +974,59 @@ Fresh evidence:
 
 Story 2.4 remains open for the final cross-adapter audit only.
 
+## Final cross-adapter acceptance audit (2026-10-24)
+
+Audited at workspace `48daecc7` with embedded-device implementation
+`28714ef0`.  The unchanged configuration-ATR `fnaccept.xex` is the sole guest
+application for every row.  The source/link guard and its cc65 map confirm it
+uses public `fn_*` calls only: no SIOV/DCB symbols, `$7f`, Q/W/P/R framing, or
+FujiBus headers occur in application code.  Its measured static image remains
+below the reserved Graphics-0 display/stack bounds; each live inspection
+records `MEMLO=$0700`, the active display-list/screen window, a 2 KiB stack
+floor, and no linked-image overlap.  Evidence paths below are relative to
+`test-evidence/` and each directory retains its adapter-specific result JSON,
+capture, guest inspection, screenshot, diagnostics and backing-store checks.
+
+| Scenario ID | Adapter | Fresh evidence | Result and independent effects |
+| --- | --- | --- | --- |
+| `public-api-clock` | NetSIO | `atari-sio-public-api-clock-20261024-011530/public-api-clock` | `ADP!`; real Clock once, File Write/Read, Network Open/Write/Read/Close, Disk Info/Write/Flush/Read; File and non-D1 ATR backing verified. |
+| `public-api-clock` | embedded | `atari-sio-public-api-clock-altirra-embedded-20261024-011644/public-api-clock-embedded` | `ADP!`; actual POKEY Q/W/P/R capture, the same real-core dispatches and persistent stores. |
+| `public-api-rejected-w-recovery` | NetSIO | `atari-sio-public-api-rejected-w-recovery-20261024-011539/public-api-clock` | `ADP!`; malformed original File W has no dispatch or backing file; one distinct File recovery Write/Read persists its marker. |
+| `public-api-rejected-w-recovery` | embedded | `atari-sio-public-api-rejected-w-recovery-altirra-embedded-20261024-011653/public-api-clock-embedded` | `ADP!`; captured POKEY NAK retries, no original File effect, then one distinct File Write/Read persists its marker. |
+| `public-api-malformed-r-recovery` | NetSIO | `atari-sio-public-api-malformed-r-recovery-20261024-011548/public-api-clock` | `ADP!`; one original File Write persists once, wrong-R NAK retries retain it, P/R drains it before one distinct Write/Read. |
+| `public-api-malformed-r-recovery` | embedded | `atari-sio-public-api-malformed-r-recovery-altirra-embedded-20261024-011701/public-api-clock-embedded` | `ADP!`; the same retained-response ordering and two independently verified File markers appear in POKEY/core evidence. |
+| `public-api-interrupted-r-recovery` | NetSIO | `atari-sio-public-api-interrupted-r-recovery-20261024-011558/public-api-clock` | `ADP!`; one original File Write persists, accepted R delivery fails and is consumed, P(IDLE) precedes one distinct Write/Read. |
+| `public-api-interrupted-r-recovery` | embedded | `atari-sio-public-api-interrupted-r-recovery-altirra-embedded-20261024-011710/public-api-clock-embedded` | `ADP!`; captured corrupted delivery and consumed-slot NAK retries, then one distinct File Write/Read and both backing markers. |
+| `public-api-reset-recovery` | NetSIO | `atari-sio-public-api-reset-recovery-20261024-011607/public-api-clock` | `ADP!`; actual COLD_RESET after READY discards the response; original and distinct recovery File markers each persist once. |
+| `public-api-reset-recovery` | embedded | `atari-sio-public-api-reset-recovery-altirra-embedded-20261024-012800/public-api-clock-embedded` | `ADP!`; observed device `ColdReset()` event, POKEY R/NAK retries and P(IDLE), then one distinct File Write/Read with both markers. |
+
+Every fresh public result has revision `1`, Q maximum `512`, flags `0`, and
+PROC `not-advertised`; no pending interval or interrupt is claimed.  Each
+adapter records its own guest RAM inspection, screenshot, process diagnostics,
+captured native traffic and backing-store evidence.  The verifiers use captured
+NetSIO datagrams or embedded POKEY traffic and reject missing/corrupt/reordered
+responses, stale READY, false guest success, duplicate dispatch and replay;
+fixture literals alone cannot create a pass.
+
+Fresh supporting gates passed: 54 fixture/runner tests, embedded production
+SIO CTest, complete `fujinet-nio-lib make check`, all ten Story 2.3 live
+native-v1 projections (`NVP!`, adapter-scoped projection status `pass`), and
+the D1 page-6 regression at `test-evidence/atari-sio-boot-20261024-012020/`
+with native and NetSIO `NIO!` signatures.  Legacy `$71`, SLIP and padded-read
+paths are excluded by the production adapter/profile tests; no alternate
+endpoint, service fixture or boot pipeline contributes acceptance evidence.
+
+**Verdict: done.**  The only remaining limitation is deliberate scope: this is
+virtual NetSIO/Altirra evidence, not physical-SIO timing or electrical proof
+(Epic 3), and it does not include BASIC `N:` work (Story 2.5).
+
 ### Approved current increment: embedded device-reset recovery
 
-Extend only the existing embedded public-acceptance path.  After the original
-side-effecting File W is accepted and real P(READY) has exposed its retained
-response—but before terminal R—invoke the actual embedded FujiNet-NIO
-`ColdReset()` through the established scoped AltirraBridge/device-reset
-mechanism.  The Atari CPU, OS and guest stay running; no direct frontend reset,
+The completed embedded reset increment extended only the existing public-
+acceptance path.  After the original side-effecting File W is accepted and real
+P(READY) has exposed its retained response—but before terminal R—the embedded
+SIO scheduling trigger invokes the actual installed FujiNet-NIO device's
+`ColdReset()` lifecycle.  The Atari CPU, OS and guest stay running; no direct frontend reset,
 fabricated NAK, guest-memory error injection or guest reset is permitted.
 
 The run must observe the actual lifecycle reset and prove original File
