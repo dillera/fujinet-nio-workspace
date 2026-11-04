@@ -339,6 +339,14 @@ def load_profile(path: Path, name: str, root: Path, environment: dict[str, str] 
         )
     if config_keys:
         result["uae_config"] = result.pop(config_keys[0])
+    # rom_key is optional: a plain (non-Amiga Forever) ROM needs none, so a
+    # reference to an unset or empty variable means "no key", not a path.
+    rom_key = result.get("rom_key")
+    if isinstance(rom_key, str):
+        substituted = string.Template(rom_key).safe_substitute(
+            {**os.environ, **environment}).strip()
+        if not substituted or "$" in substituted:
+            del result["rom_key"]
     for key in ("disk", "harddrive", "kickstart", "rom_key",
                 "fast_file_system", "uae_config"):
         if key in result:

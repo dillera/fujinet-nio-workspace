@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from nio_build.amiga_config import (
     encode_dir_mounts,
@@ -47,6 +49,28 @@ class DevelopmentShareTests(unittest.TestCase):
         )
         self.assertEqual(profile["rom_key"], "/media/rom.key")
         self.assertEqual(profile["shares"][0]["volume"], "NIO")
+
+    def test_unset_or_empty_rom_key_means_no_key(self) -> None:
+        # A plain Kickstart ROM needs no key, so AMIGA_WB13_ROM_KEY is often
+        # unset; the profile must not turn the bare reference into a path.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "workbenches.yaml"
+            config.write_text(
+                "profiles:\n"
+                "  wb1.3:\n"
+                "    disk: /media/workbench13.adf\n"
+                "    kickstart: /media/kick13.rom\n"
+                "    rom_key: ${AMIGA_WB13_ROM_KEY}\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ):
+                os.environ.pop("AMIGA_WB13_ROM_KEY", None)
+                for environment in ({}, {"AMIGA_WB13_ROM_KEY": ""}):
+                    with self.subTest(environment=environment):
+                        profile = load_profile(config, "wb1.3", root, environment)
+                        self.assertNotIn("rom_key", profile)
+                        self.assertEqual(profile["kickstart"], "/media/kick13.rom")
 
     def test_profile_without_shares_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
