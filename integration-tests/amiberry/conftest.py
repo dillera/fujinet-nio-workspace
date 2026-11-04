@@ -684,7 +684,9 @@ def amiga_environment(pytestconfig: Any) -> dict[str, str]:
             "Build first with: scripts/amiga-env build <id> [--machine <machine_id>]"
         )
 
-    for command in ("amiberry", "socat"):
+    # Check the binary the runner will actually launch: AMIBERRY_BIN may be an
+    # absolute path (e.g. inside a macOS .app bundle) rather than a PATH entry.
+    for command in (environment.get("AMIBERRY_BIN") or "amiberry", "socat"):
         if shutil.which(command, path=environment.get("PATH")) is None:
             missing.append(command)
     if not shutil.which("xdftool", path=environment.get("PATH")) and not shutil.which("uvx", path=environment.get("PATH")):
