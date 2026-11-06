@@ -109,6 +109,10 @@ setup_nio_environment() {
   export NIO_CORE_APPS_ATARI_BIN="${NIO_CORE_APPS_ATARI_BIN:-$NIO_CORE_APPS/build/atari/bin}"
   export NIO_CONFIG_MSDOS_BIN="${NIO_CONFIG_MSDOS_BIN:-$NIO_CONFIG/build/msdos/bin}"
   export NIO_CONFIG_ATARI_BIN="${NIO_CONFIG_ATARI_BIN:-$NIO_CONFIG/build/atari/bin}"
+  export NIO_CONFIG_C64_BIN="${NIO_CONFIG_C64_BIN:-$NIO_CONFIG/build/c64/bin}"
+  # The VICE build whose real-device support reaches FujiNet over NetIEC (units 8-30).
+  export VICE_FN_ROOT="${VICE_FN_ROOT:-$HOME/code/vice-fn}"
+  export FUJINET_NIO_C64_NETIEC_BIN="${FUJINET_NIO_C64_NETIEC_BIN:-$FUJINET_NIO/build/c64-netiec-debug/fujinet-nio}"
   export PDCURSES_MSDOS_LIB="${PDCURSES_MSDOS_LIB:-$NIO_BUILD_DIR/pdcurses/msdos-small/pdcurses.lib}"
 
   # Keep an Open Watcom install the caller already set up (e.g. the CI

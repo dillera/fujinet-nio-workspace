@@ -211,6 +211,9 @@ class Build:
     def lib_msdos(self) -> None:
         self.run_make("lib-msdos", "FUJINET_NIO_LIB", "msdos")
 
+    def lib_c64(self) -> None:
+        self.run_make("lib-c64", "FUJINET_NIO_LIB", "c64")
+
     def lib_atari(self) -> None:
         self.run_make("lib-atari", "FUJINET_NIO_LIB", "atari")
 
@@ -708,6 +711,10 @@ class Build:
         self.pdcurses_msdos()
         self.run_make("config-msdos", "NIO_CONFIG", "TARGET=msdos", f"FUJINET_NIO_LIB={self.p('FUJINET_NIO_LIB')}", f"PDCURSES_DIR={self.p('PDCURSES_DIR')}", f"PDCURSES_MSDOS_LIB={self.p('PDCURSES_MSDOS_LIB')}")
 
+    def config_c64(self) -> None:
+        self.lib_c64()
+        self.run_make("config-c64", "NIO_CONFIG", "TARGET=c64", f"FUJINET_NIO_LIB={self.p('FUJINET_NIO_LIB')}")
+
     def config_atari(self) -> None:
         self.lib_atari()
         self.run_make("config-atari", "NIO_CONFIG", "TARGET=atari", f"FUJINET_NIO_LIB={self.p('FUJINET_NIO_LIB')}")
@@ -723,6 +730,17 @@ class Build:
     def boot_disk_msdos(self) -> None:
         self.pdcurses_msdos()
         self.run_make("boot-disk-msdos", "NIO_CORE_APPS", "TARGET=msdos", f"FUJINET_NIO_LIB={self.p('FUJINET_NIO_LIB')}", f"FUJINET_NIO={self.p('FUJINET_NIO')}", "install-boot-disk")
+
+    def boot_disk_c64(self) -> None:
+        self.config_c64()
+        self.run_make("boot-disk-c64", "NIO_CORE_APPS", "TARGET=c64", f"FUJINET_NIO_LIB={self.p('FUJINET_NIO_LIB')}", f"FUJINET_NIO={self.p('FUJINET_NIO')}", "install-boot-disk")
+
+    def fujinet_c64_netiec(self) -> None:
+        self.runner.run("fujinet-c64-netiec-build", ["./build.sh", "-cp", "c64-netiec-debug"], cwd=self.p("FUJINET_NIO"))
+
+    def c64(self) -> None:
+        self.boot_disk_c64()
+        self.fujinet_c64_netiec()
 
     def boot_disk_atari(self) -> None:
         self.config_atari()
@@ -1125,6 +1143,7 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("master", "Build all Master-facing prerequisites, config, and boot disks", Build.workflow_master, workflow=True),
         t("msdos", "Build all MS-DOS-facing driver, apps, disks, and QEMU image", Build.workflow_msdos, workflow=True),
         t("atari", "Build all Atari-facing libraries, apps, boot disk, and emulator-side FujiNet", Build.workflow_atari, workflow=True),
+        t("c64", "Build the C64 boot disk and the firmware that serves it to VICE", Build.c64, workflow=True),
         t("linux", "Build host/Linux FujiNet presets and library", Build.workflow_linux, workflow=True),
         t("amiga", "Build Amiga-facing library and nio-apps test apps", Build.workflow_amiga, workflow=True),
         t("rp2040-stimulus", "Build RP2040 W0 PIO laboratory generator (no flashing)", Build.rp2040_stimulus, help_text=Build.rp2040_stimulus_help),
@@ -1137,11 +1156,13 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("fujinet-tcp-debug", "Build fujinet-nio TCP debug only", Build.fujinet_tcp_debug),
         t("fujinet-pty", "Build/test fujinet-nio PTY debug", Build.fujinet_pty),
         t("fujinet-rs232", "Build/test fujinet-nio RS-232 debug", Build.fujinet_rs232),
+        t("fujinet-c64-netiec", "Build fujinet-nio C64 over NetIEC debug", Build.fujinet_c64_netiec),
         t("fujinet-atari-netsio", "Build fujinet-nio Atari FujiBus over NetSIO debug", Build.fujinet_atari_netsio),
         t("lib", "Build fujinet-nio-lib Linux, MS-DOS, BBC, Atari, and Amiga libraries", lambda b: (b.lib_linux(), b.lib_msdos(), b.lib_atari(), b.lib_bbc(), b.lib_amiga())),
         t("lib-linux", "Build fujinet-nio-lib Linux library", Build.lib_linux),
         t("lib-msdos", "Build fujinet-nio-lib MS-DOS library", Build.lib_msdos),
         t("lib-atari", "Build fujinet-nio-lib Atari library", Build.lib_atari),
+        t("lib-c64", "Build fujinet-nio-lib Commodore 64 library", Build.lib_c64),
         t("lib-bbc", "Build fujinet-nio-lib BBC library", Build.lib_bbc),
         t("lib-amiga", "Build fujinet-nio-lib Amiga library", Build.lib_amiga),
         t("amiga-driver-sdk", "Build the public Amiga DiskDevice SDK archive", Build.amiga_driver_sdk),
@@ -1169,6 +1190,7 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("config-all", "Build all nio-config targets", Build.config_all),
         t("config-msdos", "Build nio-config MS-DOS app", Build.config_msdos),
         t("config-atari", "Build nio-config Atari app", Build.config_atari),
+        t("config-c64", "Build nio-config Commodore 64 app", Build.config_c64),
         t("config-bbc", "Build nio-config BBC app", Build.config_bbc),
         t("boot-disks", "Build/install platform boot disks into fujinet-nio distfiles", Build.boot_disks),
         t("boot-disk", "Alias for boot-disks", Build.boot_disks, hidden=True),
@@ -1176,6 +1198,7 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("master-boot-disk", "Build/install Master FN-BOOT-M.ssd", Build.boot_disk_master),
         t("msdos-boot-disk", "Build/install MS-DOS boot disk", Build.boot_disk_msdos),
         t("atari-boot-disk", "Build both Atari config apps and build/stage the boot disk", Build.boot_disk_atari),
+        t("c64-boot-disk", "Build/install Commodore 64 boot disk", Build.boot_disk_c64),
         t("amiga-artifacts-wb13", "Build/stage WB1.3 Amiga artifacts", Build.amiga_artifacts_wb13),
         t("amiga-artifacts-wb31", "Build/stage WB3.1 Amiga artifacts", Build.amiga_artifacts_wb31),
         t("amiga-artifacts-wb32", "Build/stage WB3.2 Amiga artifacts", Build.amiga_artifacts_wb32),
