@@ -1,0 +1,54 @@
+# Commodore 64 on IEC with FujiNet NIO
+
+Status: IN PROGRESS
+
+A C64 boots from FujiNet NIO, runs the config app, and mounts images from TNFS, on the
+same terms as the Atari: no legacy transport, a reserved NIO packet device, and a
+standard drive frontend over `DiskService`. Implementation notes are in
+`repos/fujinet-nio/docs/iec/`. The behaviour research is in
+`_bmad-output/planning-artifacts/research/technical-c64-iec-bus-behaviour-2026-11-05/`.
+
+## Clean room
+
+No code from fujinet-firmware's IEC, drive or media layers is used. A separate reader
+turned behaviour into the research record above, and the implementation was written from
+that and public documents. Its media layer is not named in anything here.
+
+## Done
+
+- [x] Firmware: `IecBus`, the drive frontend, the NIO packet channel, the D64 image type,
+      the CBM volume reader, NetIEC, the `c64-netiec` presets
+- [x] `fujinet-nio-lib`: the `c64` target and its host wire test
+- [x] `nio-config`: the `c64` target, sharing the Atari app and core
+- [x] `nio-core-apps`: the C64 boot disk
+- [x] Acceptance in VICE: `integration-tests/c64-iec/run_boot_acceptance.py`
+- [x] Firmware's TNFS client accepts session 0, the first one `tnfsd` hands out
+
+## Next
+
+- [ ] User review of the first slice
+- [ ] Line-level IEC ingress and an ESP32 board profile. The emulator path says nothing
+      about bus timing: this needs real hardware. Section D of the research is the start
+- [ ] Writing: SAVE, data channel writes and `S`, `N`, `V`, `R`, `C`
+- [ ] Other media: loose PRG files mounted as a one-file disk (the Atari's XEX path is
+      the model), D71, D81
+- [ ] Config app: name drives 8-15 rather than D1-D8, and start from RUN without typing
+- [ ] Core CLI utilities (`fls`, `fmount`, ...) for the C64
+- [ ] Decide on a diagnostics provider for the IEC devices
+- [ ] Acceptance over TNFS UDP. Docker Desktop's published UDP ports do not reach the
+      daemon on macOS, so the acceptance test uses TNFS over TCP
+- [ ] Real D64s over TNFS UDP from a server on the internet. Browsing and mounting
+      `tnfs://fujinet.online/` work from a C64, but reading `CBM/games/jumpman.d64` failed:
+      the firmware's parallel read-ahead (8 LSEEKs at once) timed out while the replies were
+      still arriving, tagged with an earlier batch's sequence numbers. That is in the
+      common TNFS client, not IEC, and needs looking at against a server we can watch
+
+## Acceptance
+
+```sh
+scripts/build.sh c64
+python3 integration-tests/c64-iec/run_boot_acceptance.py
+```
+
+Needs Docker for `tnfsd`, and the `vice-fn` build of VICE (`VICE_FN_ROOT`). Evidence,
+with a picture of each screen, goes to `test-evidence/c64-iec/`.

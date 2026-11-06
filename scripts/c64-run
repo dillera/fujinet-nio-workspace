@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# A C64 in a VICE window with fujinet-nio on its serial bus, from the boot disk.
+#
+# Build first:
+#   (cd repos/fujinet-nio && ./build.sh -cp c64-netiec-debug)
+#   make -C repos/nio-config c64
+#   make -C repos/nio-core-apps TARGET=c64 boot-disk
+#
+# Then on the C64: LOAD"*",8,1 and RUN.
+#
+#   C64_RUN_DIR       where the firmware keeps its state (default: build/c64-run)
+#   VICE_FN_ROOT      the vice-fn checkout
+#   Other arguments go to VICE.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=env.sh
+source "$SCRIPT_DIR/env.sh"
+
+boot_disk="$NIO_CORE_APPS/build/c64/disk/boot/autorun.d64"
+launcher="$VICE_FN_ROOT/svn-mirror/fujinet/run-vice-fujinet.sh"
+for needed in "$FUJINET_NIO_C64_NETIEC_BIN" "$boot_disk" "$launcher"; do
+  if [[ ! -e $needed ]]; then
+    echo "c64-run: missing $needed" >&2
+    exit 2
+  fi
+done
+
+run_dir="${C64_RUN_DIR:-$NIO_BUILD_DIR/c64-run}"
+mkdir -p "$run_dir/fujinet-data/boot/c64"
+cp "$boot_disk" "$run_dir/fujinet-data/boot/c64/autorun.d64"
+
+# Its stdin stays open: the firmware's console treats EOF as a request to quit.
+(cd "$run_dir" && exec "$FUJINET_NIO_C64_NETIEC_BIN" < <(tail -f /dev/null)) > "$run_dir/firmware.log" 2>&1 &
+firmware=$!
+trap 'kill "$firmware" 2>/dev/null || true' EXIT
+echo "c64-run: firmware log: $run_dir/firmware.log"
+
+FUJINET_UNITS="8 30" "$launcher" -default "$@"
