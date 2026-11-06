@@ -31,8 +31,12 @@ that and public documents. Its media layer is not named in anything here.
 ## Next
 
 - [ ] User review of the first slice
-- [ ] Line-level IEC ingress and an ESP32 board profile. The emulator path says nothing
-      about bus timing: this needs real hardware. Section D of the research is the start
+- [ ] Line-level IEC ingress and ESP32 board profiles for the IEC Nugget and LOLIN D32. The
+      emulator path says nothing about bus timing: this needs real hardware. Section D of the
+      research is the start. Both boards are classic ESP32s with quad PSRAM, and their
+      fujinet-firmware releases use a 16 MB layout. The sources already compile and link for
+      that chip (a 2.17 MB image, so it needs an app slot over 2 MB), but nothing drives the
+      lines there yet
 - [ ] Writing: SAVE, data channel writes and `S`, `N`, `V`, `R`, `C`
 - [ ] Other media: D71, D81
 - [ ] Config app: name drives 8-15 rather than D1-D8, and start from RUN without typing
