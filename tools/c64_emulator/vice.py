@@ -134,6 +134,10 @@ class Vice:
         self._request_id = 0
 
     def start(self, timeout: float = 20.0) -> None:
+        # Connecting to another VICE's monitor would type into that machine.
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", self.config.monitor_port)) == 0:
+                raise RuntimeError(f"monitor port {self.config.monitor_port} is already in use")
         env = dict(os.environ)
         env["FUJINET_UNITS"] = " ".join(str(u) for u in self.config.units)
         env["VICE_BUILD"] = str(self.config.build_dir)

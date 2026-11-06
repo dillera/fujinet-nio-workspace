@@ -2,9 +2,9 @@
 """C64 boot acceptance over IEC: a stock KERNAL in VICE against fujinet-nio.
 
 The whole path a person takes: list the boot disk, load and run the config app, add a
-TNFS host, browse it, assign a disk image, boot, and load a program from that image.
-TNFS is the project's own test daemon image. Evidence (each screen, the firmware log)
-goes to test-evidence/c64-iec/<time>/.
+TNFS host, browse it, assign a disk image and a loose program, boot, and load a program
+from each. TNFS is the project's own test daemon image. Evidence (each screen, the
+firmware log) goes to test-evidence/c64-iec/<time>/.
 
 What this cannot show: the bus runs through VICE's KERNAL traps and NetIEC, so it says
 nothing about line timing on real hardware.
@@ -76,6 +76,7 @@ def prepare_tnfs_root(root: Path) -> None:
     (source / "HELLO.prg").write_bytes(basic_hello("HELLO FROM TNFS"))
     (root / "games").mkdir(parents=True, exist_ok=True)
     (root / "readme.txt").write_text("not a disk image\n")
+    (root / "games" / "loose.prg").write_bytes(basic_hello("HELLO FROM A LOOSE PRG"))
     subprocess.run(
         [sys.executable, str(CREATE_D64), "-i", str(source), "-o", str(root / "games" / "hello.d64"),
          "-t", "TNFS DISK", "--id", "TN"],
@@ -101,10 +102,11 @@ def stop_tnfs(log_path: Path) -> None:
     subprocess.run(["docker", "rm", "-f", TNFS_CONTAINER], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def start_firmware(binary: Path, run_dir: Path, boot_disk: Path, log_path: Path) -> subprocess.Popen:
+def start_firmware(binary: Path, run_dir: Path, boot_disk: Path, log_path: Path, netiec_port: int) -> subprocess.Popen:
     target = run_dir / "fujinet-data" / "boot" / "c64"
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy(boot_disk, target / "autorun.d64")
+    (run_dir / "fujinet-data" / "fujinet.yaml").write_text(f"channel:\n  tcp_port: {netiec_port}\n")
     log = log_path.open("wb")
     # stdin stays open: the firmware's console treats EOF as a request to quit.
     return subprocess.Popen([str(binary)], cwd=run_dir, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
@@ -173,6 +175,14 @@ def run_scenario(vice: Vice, evidence: Evidence, load_timeout: float) -> None:
     text = vice.wait_for(r"D1 <- hello\.d64", timeout=20)
     evidence.screen("config-assigned", text)
 
+    step("Assign the loose program too: it sorts next")
+    vice.press(bytes([KEY_DOWN]))
+    vice.press(bytes([KEY_RETURN]))
+    vice.wait_for(r"Press 1-8", timeout=20)
+    vice.type_text("2")
+    text = vice.wait_for(r"D2 <- loose\.prg", timeout=20)
+    evidence.screen("config-assigned-prg", text)
+
     step("Boot: F1 mounts it from TNFS and restarts the machine")
     vice.press(bytes([KEY_F1]))
     text = vice.wait_for(r"(?s)commodore 64 basic v2.*ready\.", timeout=60)
@@ -193,6 +203,21 @@ def run_scenario(vice: Vice, evidence: Evidence, load_timeout: float) -> None:
     text = vice.wait_for(r"hello from tnfs", timeout=15)
     evidence.screen("program-from-tnfs", text)
 
+    step("The loose program is drive 9: a one-file disk, named after its file")
+    vice.type_text("?chr$(147)\n")  # clears the screen, so the waits below see only this drive
+    vice.type_text('load"$",9\n')
+    vice.wait_for(r"searching for \$\s*\nloading\s*\nready\.", timeout=30)
+    vice.type_text("list\n")
+    text = vice.wait_for(r"blocks free", timeout=10)
+    evidence.screen("loose-prg-directory", text)
+    expect(text, '"loose', 'fn 2a', "prg")
+
+    vice.type_text('load"*",9\n')
+    vice.wait_for(r"searching for \*\s*\nloading\s*\nready\.", timeout=30)
+    vice.type_text("run\n")
+    text = vice.wait_for(r"hello from a loose prg", timeout=15)
+    evidence.screen("program-from-loose-prg", text)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -204,6 +229,8 @@ def main() -> int:
                         default=Path(os.environ.get("VICE_FN_ROOT", Path.home() / "code" / "vice-fn")))
     parser.add_argument("--window", action="store_true", help="use the windowed VICE build")
     parser.add_argument("--load-timeout", type=float, default=120.0, help="seconds to allow for loading the config app")
+    parser.add_argument("--netiec-port", type=int, default=NETIEC_PORT, help="for the firmware and VICE's bridge")
+    parser.add_argument("--monitor-port", type=int, default=6502, help="VICE's binary monitor")
     args = parser.parse_args()
 
     for path, what in ((args.firmware, "firmware (./build.sh -cp c64-netiec-debug)"),
@@ -225,8 +252,9 @@ def main() -> int:
     prepare_tnfs_root(tnfs_root)
     start_tnfs(tnfs_root)
 
-    firmware = start_firmware(args.firmware, run_dir, args.boot_disk, evidence_dir / "firmware.log")
-    vice = Vice(ViceConfig(root=args.vice_root, headless=not args.window, netiec_port=NETIEC_PORT),
+    firmware = start_firmware(args.firmware, run_dir, args.boot_disk, evidence_dir / "firmware.log", args.netiec_port)
+    vice = Vice(ViceConfig(root=args.vice_root, units=(8, 9, 30), headless=not args.window,
+                           netiec_port=args.netiec_port, monitor_port=args.monitor_port),
                 evidence_dir / "vice.log")
     evidence = Evidence(evidence_dir, vice)
     result = 1
