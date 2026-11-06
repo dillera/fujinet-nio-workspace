@@ -23,6 +23,10 @@ that and public documents. Its media layer is not named in anything here.
 - [x] `nio-core-apps`: the C64 boot disk
 - [x] Acceptance in VICE: `integration-tests/c64-iec/run_boot_acceptance.py`
 - [x] Firmware's TNFS client accepts session 0, the first one `tnfsd` hands out
+- [x] Loose `.prg` files mount as a read-only one-file disk (`ImageType::Prg`), the Atari's
+      XEX path being the model
+- [x] Real D64s and a real PRG over TNFS UDP, from `tnfs://fujinet.diller.org/`: each loaded
+      into the C64 byte for byte, with no timeouts in the firmware log
 
 ## Next
 
@@ -30,18 +34,17 @@ that and public documents. Its media layer is not named in anything here.
 - [ ] Line-level IEC ingress and an ESP32 board profile. The emulator path says nothing
       about bus timing: this needs real hardware. Section D of the research is the start
 - [ ] Writing: SAVE, data channel writes and `S`, `N`, `V`, `R`, `C`
-- [ ] Other media: loose PRG files mounted as a one-file disk (the Atari's XEX path is
-      the model), D71, D81
+- [ ] Other media: D71, D81
 - [ ] Config app: name drives 8-15 rather than D1-D8, and start from RUN without typing
 - [ ] Core CLI utilities (`fls`, `fmount`, ...) for the C64
 - [ ] Decide on a diagnostics provider for the IEC devices
 - [ ] Acceptance over TNFS UDP. Docker Desktop's published UDP ports do not reach the
       daemon on macOS, so the acceptance test uses TNFS over TCP
-- [ ] Real D64s over TNFS UDP from a server on the internet. Browsing and mounting
-      `tnfs://fujinet.online/` work from a C64, but reading `CBM/games/jumpman.d64` failed:
-      the firmware's parallel read-ahead (8 LSEEKs at once) timed out while the replies were
-      still arriving, tagged with an earlier batch's sequence numbers. That is in the
-      common TNFS client, not IEC, and needs looking at against a server we can watch
+- [ ] Reads from `tnfs://fujinet.online/`. Browsing and mounting work from a C64, but reading
+      `CBM/games/jumpman.d64` failed: the firmware's parallel read-ahead (8 LSEEKs at once)
+      timed out while the replies were still arriving, tagged with an earlier batch's sequence
+      numbers. The same read-ahead is clean against `fujinet.diller.org`, so it may be that
+      server or its latency. It is in the common TNFS client, not IEC
 
 ## Acceptance
 
