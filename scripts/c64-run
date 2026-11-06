@@ -30,10 +30,17 @@ run_dir="${C64_RUN_DIR:-$NIO_BUILD_DIR/c64-run}"
 mkdir -p "$run_dir/fujinet-data/boot/c64"
 cp "$boot_disk" "$run_dir/fujinet-data/boot/c64/autorun.d64"
 
-# Its stdin stays open: the firmware's console treats EOF as a request to quit.
-(cd "$run_dir" && exec "$FUJINET_NIO_C64_NETIEC_BIN" < <(tail -f /dev/null)) > "$run_dir/firmware.log" 2>&1 &
+# Its stdin stays open, on a pipe that needs no writer process to clean up afterwards:
+# the firmware's console treats EOF as a request to quit.
+stdin_pipe="$run_dir/firmware.stdin"
+rm -f "$stdin_pipe"
+mkfifo "$stdin_pipe"
+exec 3<>"$stdin_pipe"
+rm -f "$stdin_pipe"
+
+(cd "$run_dir" && exec "$FUJINET_NIO_C64_NETIEC_BIN" <&3 3<&-) > "$run_dir/firmware.log" 2>&1 &
 firmware=$!
 trap 'kill "$firmware" 2>/dev/null || true' EXIT
 echo "c64-run: firmware log: $run_dir/firmware.log"
 
-FUJINET_UNITS="8 30" "$launcher" -default "$@"
+FUJINET_UNITS="8 30" "$launcher" -default "$@" 3<&-
