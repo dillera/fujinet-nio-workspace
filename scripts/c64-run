@@ -43,4 +43,5 @@ firmware=$!
 trap 'kill "$firmware" 2>/dev/null || true' EXIT
 echo "c64-run: firmware log: $run_dir/firmware.log"
 
-FUJINET_UNITS="8 30" "$launcher" -default "$@" 3<&-
+# Drives D1-D4 as units 8-11, and the firmware's NIO device.
+FUJINET_UNITS="8 9 10 11 30" "$launcher" -default "$@" 3<&-
