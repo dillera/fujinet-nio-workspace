@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """C64 boot acceptance over IEC: a stock KERNAL in VICE against fujinet-nio.
 
-The whole path a person takes: list the boot disk, load and run the config app, add a
-TNFS host, browse it, assign a disk image and a loose program, boot, and load a program
-from each. TNFS is the project's own test daemon image. Evidence (each screen, the
+The whole path a person takes: list the boot disk, load and run the config app, run the
+demo from it, add a TNFS host, browse it, assign a disk image and a loose program, boot,
+and load a program from each. TNFS is the project's own test daemon image. Evidence (each screen, the
 firmware log) goes to test-evidence/c64-iec/<time>/.
 
 What this cannot show: the bus runs through VICE's KERNAL traps and NetIEC, so it says
@@ -24,7 +24,7 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(WORKSPACE / "tools" / "c64_emulator"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from vice import KEY_DOWN, KEY_F1, KEY_RETURN, Vice, ViceConfig  # noqa: E402
+from vice import KEY_DOWN, KEY_F1, KEY_F5, KEY_RETURN, Vice, ViceConfig  # noqa: E402
 
 TNFS_IMAGE = "zaqu/tnfsd"
 TNFS_CONTAINER = "fujinet-tnfs-c64-acceptance"
@@ -112,6 +112,18 @@ def start_firmware(binary: Path, run_dir: Path, boot_disk: Path, log_path: Path,
     return subprocess.Popen([str(binary)], cwd=run_dir, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
 
 
+def start_config_app(vice: Vice, load_timeout: float) -> str:
+    started = time.monotonic()
+    vice.type_text('load"*",8,1\n')
+    vice.wait_for(r"searching for \*\s*\nloading\s*\nready\.", timeout=load_timeout)
+    print(f"   loaded in {time.monotonic() - started:.1f} s")
+    vice.type_text("run\n")
+    vice.wait_for(r"FujiNet NIO Config", timeout=30)
+    text = vice.wait_for(r"Ready", timeout=30)
+    expect(text, "Hosts", "Browse", "Drives", "Setup", "F1 Boot")
+    return text
+
+
 def run_scenario(vice: Vice, evidence: Evidence, load_timeout: float) -> None:
     step("C64 starts at the BASIC prompt")
     text = vice.wait_for(r"ready\.", timeout=20)
@@ -123,7 +135,7 @@ def run_scenario(vice: Vice, evidence: Evidence, load_timeout: float) -> None:
     vice.type_text("list\n")
     text = vice.wait_for(r"blocks free", timeout=10)
     evidence.screen("boot-disk-directory", text)
-    expect(text, '"fujinet nio', 'fn 2a', '"config"', "prg")
+    expect(text, '"fujinet nio', 'fn 2a', '"config"', '"fujidemo"', "prg")
 
     step("A file that is not there is FILE NOT FOUND, and the status channel says why")
     vice.type_text('load"nope",8\n')
@@ -135,15 +147,19 @@ def run_scenario(vice: Vice, evidence: Evidence, load_timeout: float) -> None:
     evidence.screen("status-channel", text)
 
     step('LOAD"*",8,1 and RUN start the config app')
-    started = time.monotonic()
-    vice.type_text('load"*",8,1\n')
-    vice.wait_for(r"searching for \*\s*\nloading\s*\nready\.", timeout=load_timeout)
-    print(f"   loaded in {time.monotonic() - started:.1f} s")
-    vice.type_text("run\n")
-    text = vice.wait_for(r"FujiNet NIO Config", timeout=30)
-    text = vice.wait_for(r"Ready", timeout=30)
-    evidence.screen("config-hosts", text)
-    expect(text, "Hosts", "Browse", "Drives", "Setup", "F1 Boot")
+    evidence.screen("config-hosts", start_config_app(vice, load_timeout))
+
+    step("F5 runs the demo, which reads the date and time over the NIO channel")
+    vice.press(bytes([KEY_F5]))
+    vice.wait_for(r"f u j i n e t   n i o", timeout=30)
+    text = vice.wait_for(r"fujinet online", timeout=15)
+    evidence.screen("demo", text)
+    expect(text, str(time.localtime().tm_year))
+
+    step("Reset, and the boot disk still starts the config app")
+    vice.reset()
+    vice.wait_for(r"(?s)commodore 64 basic v2.*ready\.", timeout=20)
+    start_config_app(vice, load_timeout)
 
     step("Add the TNFS host")
     vice.type_text("a")
