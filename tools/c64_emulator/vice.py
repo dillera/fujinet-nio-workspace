@@ -43,6 +43,7 @@ KEY_DOWN = 0x11
 KEY_DEL = 0x14
 KEY_F1 = 0x85
 KEY_F3 = 0x86
+KEY_F5 = 0x87
 KEY_RUN_STOP = 0x03
 
 
@@ -216,6 +217,11 @@ class Vice:
 
     def _resume(self) -> None:
         self._call(CMD_EXIT)
+
+    def reset(self) -> None:
+        """What the reset button does. The firmware keeps its mounts."""
+        self._call(CMD_RESET, bytes([0]))
+        self._resume()
 
     def _read_memory(self, start: int, end: int) -> bytes:
         body = struct.pack("<BHHBH", 0, start, end, 0, 0)  # no side effects, main memory, default bank

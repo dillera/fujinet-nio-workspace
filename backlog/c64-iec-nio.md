@@ -27,6 +27,8 @@ that and public documents. Its media layer is not named in anything here.
       XEX path being the model
 - [x] Real D64s and a real PRG over TNFS UDP, from `tnfs://fujinet.diller.org/`: each loaded
       into the C64 byte for byte, with no timeouts in the firmware log
+- [x] The FujiNet demo on the boot disk: F5 in CONFIG runs it, and it reads the date and time
+      over the NIO channel. The sources are in `repos/nio-core-apps/apps/platform/c64/fujidemo/`
 
 ## Next
 
