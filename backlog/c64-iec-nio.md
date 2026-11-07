@@ -16,23 +16,28 @@ that and public documents. Its media layer is not named in anything here.
 
 ## Done
 
-- [x] Firmware: `IecBus`, the drive frontend, the NIO packet channel, the D64 image type,
-      the CBM volume reader, NetIEC, the `c64-netiec` presets
-- [x] `fujinet-nio-lib`: the `c64` target and its host wire test
-- [x] `nio-config`: the `c64` target, sharing the Atari app and core
-- [x] `nio-core-apps`: the C64 boot disk
-- [x] Acceptance in VICE: `integration-tests/c64-iec/run_boot_acceptance.py`
-- [x] Firmware's TNFS client accepts session 0, the first one `tnfsd` hands out
+- [x] Firmware (fujinet-nio #27): `IecBus`, the drive frontend, the NIO packet channel, the
+      D64 image type, the CBM volume reader, NetIEC, the `c64-netiec` presets
+- [x] Firmware's TNFS client accepts session 0, the first one `tnfsd` hands out (#27)
 - [x] Loose `.prg` files mount as a read-only one-file disk (`ImageType::Prg`), the Atari's
-      XEX path being the model
+      XEX path being the model (#27)
+- [x] `fujinet-nio-lib` (#8): the `c64` target and its host wire test
 - [x] Real D64s and a real PRG over TNFS UDP, from `tnfs://fujinet.diller.org/`: each loaded
       into the C64 byte for byte, with no timeouts in the firmware log
-- [x] The FujiNet demo on the boot disk: F5 in CONFIG runs it, and it reads the date and time
-      over the NIO channel. The sources are in `repos/nio-core-apps/apps/platform/c64/fujidemo/`
+
+## In review
+
+- [ ] `nio-config` (#6): the `c64` target, sharing the Atari app and core, and F5 to run the
+      demo
+- [ ] `nio-core-apps` (#1): the C64 boot disk, and the FujiNet demo on it, which reads the date
+      and time over the NIO channel. The sources are in `apps/platform/c64/fujidemo/`
+- [ ] Workspace (#7): acceptance in VICE (`integration-tests/c64-iec/`), and the `c64` build
+      tasks
 
 ## Next
 
-- [ ] User review of the first slice
+- [ ] An open file channel keeps reading its slot after the image is remounted:
+      [iec-drive-remount-open-channels.md](iec-drive-remount-open-channels.md)
 - [ ] Line-level IEC ingress and ESP32 board profiles for the IEC Nugget and LOLIN D32. The
       emulator path says nothing about bus timing: this needs real hardware. Section D of the
       research is the start. Both boards are classic ESP32s with quad PSRAM, and their
@@ -59,5 +64,6 @@ scripts/build.sh c64
 python3 integration-tests/c64-iec/run_boot_acceptance.py
 ```
 
-Needs Docker for `tnfsd`, and the `vice-fn` build of VICE (`VICE_FN_ROOT`). Evidence,
-with a picture of each screen, goes to `test-evidence/c64-iec/`.
+Needs Docker for `tnfsd`, and the `vice-fn` build of VICE in `VICE_FN_ROOT`: see
+`integration-tests/c64-iec/README.md`. Evidence, with a picture of each screen, goes to
+`test-evidence/c64-iec/`.
