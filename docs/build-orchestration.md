@@ -9,6 +9,7 @@ platform workflows:
 ./scripts/build.sh master
 ./scripts/build.sh msdos
 ./scripts/build.sh atari
+./scripts/build.sh c64
 ./scripts/build.sh linux
 ./scripts/build.sh amiga
 ./scripts/build.sh all
@@ -24,11 +25,16 @@ and banked config applications, and the ATR, then installs it into the POSIX
 and ESP32 firmware distfiles. It does not flash the device; use
 `./build.sh -f` from `repos/fujinet-nio` when ready.
 
+`./scripts/build.sh c64` builds the C64 library, config app and D64 boot disk,
+installs the disk into the firmware distfiles, and builds the `c64-netiec-debug`
+firmware that serves it to VICE. `all`, `lib` and `boot-disks` include the C64.
+Running it in VICE is described in `integration-tests/c64-iec/README.md`.
+
 ## Target layers
 
 | Layer | Examples | Purpose |
 | --- | --- | --- |
-| Platform workflow | `bbc`, `master`, `msdos`, `atari`, `linux`, `amiga`, `all` | Normal daily builds with the platform's required dependencies and artifacts |
+| Platform workflow | `bbc`, `master`, `msdos`, `atari`, `c64`, `linux`, `amiga`, `all` | Normal daily builds with the platform's required dependencies and artifacts |
 | Artifact workflow | `bbc-boot-disk`, `qemu-msdos-image`, `amiga-driver-sdk` | Build or diagnose one composed output |
 | Repository task | Repo-local `make`/CMake invocation wrapped by Python | Internal orchestration and CI building blocks |
 

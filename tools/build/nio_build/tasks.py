@@ -802,6 +802,7 @@ class Build:
     def boot_disks(self) -> None:
         self.boot_disk_msdos()
         self.boot_disk_atari()
+        self.boot_disk_c64()
         self.boot_disk_bbc()
         self.amiga_default_disk_wb13()
         self.amiga_default_disk_wb31()
@@ -1129,6 +1130,7 @@ class Build:
         self.workflow_linux()
         self.workflow_msdos()
         self.workflow_atari()
+        self.c64()
         self.workflow_bbc()
         self.workflow_amiga()
 
@@ -1158,7 +1160,7 @@ def build_tasks(build: Build) -> dict[str, Task]:
         t("fujinet-rs232", "Build/test fujinet-nio RS-232 debug", Build.fujinet_rs232),
         t("fujinet-c64-netiec", "Build fujinet-nio C64 over NetIEC debug", Build.fujinet_c64_netiec),
         t("fujinet-atari-netsio", "Build fujinet-nio Atari FujiBus over NetSIO debug", Build.fujinet_atari_netsio),
-        t("lib", "Build fujinet-nio-lib Linux, MS-DOS, BBC, Atari, and Amiga libraries", lambda b: (b.lib_linux(), b.lib_msdos(), b.lib_atari(), b.lib_bbc(), b.lib_amiga())),
+        t("lib", "Build fujinet-nio-lib Linux, MS-DOS, BBC, Atari, C64, and Amiga libraries", lambda b: (b.lib_linux(), b.lib_msdos(), b.lib_atari(), b.lib_c64(), b.lib_bbc(), b.lib_amiga())),
         t("lib-linux", "Build fujinet-nio-lib Linux library", Build.lib_linux),
         t("lib-msdos", "Build fujinet-nio-lib MS-DOS library", Build.lib_msdos),
         t("lib-atari", "Build fujinet-nio-lib Atari library", Build.lib_atari),
