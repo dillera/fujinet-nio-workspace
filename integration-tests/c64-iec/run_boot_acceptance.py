@@ -3,11 +3,11 @@
 
 The whole path a person takes: list the boot disk, load and run the config app, run the
 demo from it, add a TNFS host, browse it, assign a disk image and a loose program, boot,
-and load a program from each. TNFS is the project's own test daemon image. Evidence (each screen, the
-firmware log) goes to test-evidence/c64-iec/<time>/.
+and load a program from each. TNFS is the daemon image the firmware's own test services
+use. Evidence (each screen, the firmware log) goes to test-evidence/c64-iec/<time>/.
 
 What this cannot show: the bus runs through VICE's KERNAL traps and NetIEC, so it says
-nothing about line timing on real hardware.
+nothing about line timing on real hardware. See README.md beside this file.
 """
 
 from __future__ import annotations
@@ -15,30 +15,26 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 WORKSPACE = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(WORKSPACE / "tools" / "c64_emulator"))
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(WORKSPACE / "tools"))
 
-from vice import KEY_DOWN, KEY_F1, KEY_F5, KEY_RETURN, Vice, ViceConfig  # noqa: E402
+from c64_emulator.basic import basic_hello  # noqa: E402
+from c64_emulator.vice import KEY_DOWN, KEY_F1, KEY_F5, KEY_RETURN, Vice, ViceConfig  # noqa: E402
 
-TNFS_IMAGE = "zaqu/tnfsd"
+# The image repos/fujinet-nio/scripts/start_test_services.sh uses. It has only a latest
+# tag, so this pins the image that tag pointed at on 2026-11-07.
+TNFS_IMAGE = "zaqu/tnfsd@sha256:1dd216bcf120deb269feb83feddc6d1e7f7897c02469aaa195c5146a587fcdb0"
 TNFS_CONTAINER = "fujinet-tnfs-c64-acceptance"
 TNFS_PORT = 16384
 NETIEC_PORT = 1541
 CREATE_D64 = WORKSPACE / "repos" / "nio-core-apps" / "boot-disk" / "scripts" / "create_d64.py"
-
-
-def basic_hello(message: str) -> bytes:
-    """A one-line tokenised BASIC program: 10 PRINT"message"."""
-    token_print = 0x99
-    line = bytes([token_print]) + b'"' + message.encode("ascii") + b'"\0'
-    next_line = 0x0801 + 4 + len(line)
-    return bytes([0x01, 0x08, next_line & 0xFF, next_line >> 8, 10, 0]) + line + b"\0\0"
+README = "integration-tests/c64-iec/README.md"
 
 
 class Evidence:
@@ -107,9 +103,22 @@ def start_firmware(binary: Path, run_dir: Path, boot_disk: Path, log_path: Path,
     target.mkdir(parents=True, exist_ok=True)
     shutil.copy(boot_disk, target / "autorun.d64")
     (run_dir / "fujinet-data" / "fujinet.yaml").write_text(f"channel:\n  tcp_port: {netiec_port}\n")
-    log = log_path.open("wb")
-    # stdin stays open: the firmware's console treats EOF as a request to quit.
-    return subprocess.Popen([str(binary)], cwd=run_dir, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+    with log_path.open("wb") as log:  # the firmware keeps its own copy of the file
+        # stdin stays open: the firmware's console treats EOF as a request to quit.
+        return subprocess.Popen([str(binary.resolve())], cwd=run_dir, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+
+
+def wait_for_netiec(port: int, firmware: subprocess.Popen, log_path: Path, timeout: float = 15.0) -> None:
+    """Until the firmware takes connections for VICE's bridge."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if firmware.poll() is not None:
+            raise RuntimeError(f"firmware exited at once; see {log_path}")
+        with socket.socket() as probe:
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return
+        time.sleep(0.1)
+    raise RuntimeError(f"firmware is not listening on port {port}; see {log_path}")
 
 
 def start_config_app(vice: Vice, load_timeout: float) -> str:
@@ -241,17 +250,23 @@ def main() -> int:
                         default=WORKSPACE / "repos" / "fujinet-nio" / "build" / "c64-netiec-debug" / "fujinet-nio")
     parser.add_argument("--boot-disk", type=Path,
                         default=WORKSPACE / "repos" / "nio-core-apps" / "build" / "c64" / "disk" / "boot" / "autorun.d64")
-    parser.add_argument("--vice-root", type=Path,
-                        default=Path(os.environ.get("VICE_FN_ROOT", Path.home() / "code" / "vice-fn")))
+    parser.add_argument("--vice-root", type=Path, default=os.environ.get("VICE_FN_ROOT") or None,
+                        help="the vice-fn checkout (default: $VICE_FN_ROOT)")
     parser.add_argument("--window", action="store_true", help="use the windowed VICE build")
     parser.add_argument("--load-timeout", type=float, default=120.0, help="seconds to allow for loading the config app")
     parser.add_argument("--netiec-port", type=int, default=NETIEC_PORT, help="for the firmware and VICE's bridge")
     parser.add_argument("--monitor-port", type=int, default=6502, help="VICE's binary monitor")
     args = parser.parse_args()
 
-    for path, what in ((args.firmware, "firmware (./build.sh -cp c64-netiec-debug)"),
-                       (args.boot_disk, "boot disk (make -f makefiles/build.mk TARGET=c64 boot-disk in nio-core-apps)"),
-                       (args.vice_root / "svn-mirror" / "fujinet" / "run-vice-fujinet.sh", "the vice-fn checkout")):
+    if args.vice_root is None:
+        print(f"set VICE_FN_ROOT, or pass --vice-root, to the vice-fn checkout: see {README}", file=sys.stderr)
+        return 2
+    vice_config = ViceConfig(root=Path(args.vice_root), units=(8, 9, 30), headless=not args.window,
+                             netiec_port=args.netiec_port, monitor_port=args.monitor_port)
+    for path, what in ((args.firmware, "firmware (scripts/build.sh c64)"),
+                       (args.boot_disk, "boot disk (scripts/build.sh c64)"),
+                       (vice_config.launcher, f"the vice-fn checkout (see {README})"),
+                       (vice_config.build_dir / "src" / "x64sc", f"this VICE build (see {README})")):
         if not path.exists():
             print(f"missing {what}: {path}", file=sys.stderr)
             return 2
@@ -260,41 +275,50 @@ def main() -> int:
         return 2
 
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
-    evidence_dir = WORKSPACE / "test-evidence" / "c64-iec" / stamp
+    evidence_root = WORKSPACE / "test-evidence" / "c64-iec"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    for again in range(1, 100):  # a run that started in the same second has the first name
+        evidence_dir = evidence_root / (stamp if again == 1 else f"{stamp}-{again}")
+        try:
+            evidence_dir.mkdir()
+            break
+        except FileExistsError:
+            continue
     run_dir = evidence_dir / "run"
-    run_dir.mkdir(parents=True)
+    run_dir.mkdir()
 
     tnfs_root = evidence_dir / "tnfs"
     prepare_tnfs_root(tnfs_root)
-    start_tnfs(tnfs_root)
 
-    firmware = start_firmware(args.firmware, run_dir, args.boot_disk, evidence_dir / "firmware.log", args.netiec_port)
-    vice = Vice(ViceConfig(root=args.vice_root, units=(8, 9, 30), headless=not args.window,
-                           netiec_port=args.netiec_port, monitor_port=args.monitor_port),
-                evidence_dir / "vice.log")
+    firmware_log = evidence_dir / "firmware.log"
+    firmware: subprocess.Popen | None = None
+    vice = Vice(vice_config, evidence_dir / "vice.log")
     evidence = Evidence(evidence_dir, vice)
     result = 1
     try:
-        time.sleep(0.5)
-        if firmware.poll() is not None:
-            raise RuntimeError(f"firmware exited at once; see {evidence_dir / 'firmware.log'}")
+        start_tnfs(tnfs_root)
+        firmware = start_firmware(args.firmware, run_dir, args.boot_disk, firmware_log, args.netiec_port)
+        wait_for_netiec(args.netiec_port, firmware, firmware_log)
         vice.start()
         run_scenario(vice, evidence, args.load_timeout)
         result = 0
         print(f"PASS  evidence: {evidence_dir}")
-    except (AssertionError, TimeoutError, RuntimeError, StopIteration) as error:
+    except (AssertionError, TimeoutError, RuntimeError, StopIteration, OSError,
+            subprocess.CalledProcessError) as error:
         print(f"FAIL  {error}\nevidence: {evidence_dir}", file=sys.stderr)
-        try:
-            evidence.screen("at-failure", vice.screen_text())
-        except (OSError, RuntimeError, TimeoutError):
-            pass
+        if vice.sock is not None:
+            try:
+                evidence.screen("at-failure", vice.screen_text())
+            except (OSError, RuntimeError, TimeoutError):
+                pass
     finally:
         vice.stop()
-        firmware.terminate()
-        try:
-            firmware.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            firmware.kill()
+        if firmware is not None:
+            firmware.terminate()
+            try:
+                firmware.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                firmware.kill()
         stop_tnfs(evidence_dir / "tnfs.log")
     return result
 

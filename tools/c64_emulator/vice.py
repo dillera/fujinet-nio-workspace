@@ -144,21 +144,21 @@ class Vice:
         env["VICE_BUILD"] = str(self.config.build_dir)
         env["NETIEC_PORT"] = str(self.config.netiec_port)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_path.open("wb")
-        self.process = subprocess.Popen(
-            [
-                str(self.config.launcher),
-                "-default",
-                "-binarymonitor",
-                "-binarymonitoraddress",
-                f"ip4://127.0.0.1:{self.config.monitor_port}",
-                "+sound",
-            ],
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-        )
+        with self.log_path.open("wb") as log:  # VICE keeps its own copy of the file
+            self.process = subprocess.Popen(
+                [
+                    str(self.config.launcher),
+                    "-default",
+                    "-binarymonitor",
+                    "-binarymonitoraddress",
+                    f"ip4://127.0.0.1:{self.config.monitor_port}",
+                    "+sound",
+                ],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.process.poll() is not None:
