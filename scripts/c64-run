@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 # A C64 in a VICE window with fujinet-nio on its serial bus, from the boot disk.
 #
-# Build first:
-#   (cd repos/fujinet-nio && ./build.sh -cp c64-netiec-debug)
-#   make -C repos/nio-config c64
-#   make -C repos/nio-core-apps TARGET=c64 boot-disk
+# Build first: scripts/build.sh c64. Then on the C64: LOAD"*",8,1 and RUN.
 #
-# Then on the C64: LOAD"*",8,1 and RUN.
-#
+#   VICE_FN_ROOT      the vice-fn checkout, with its build-sdl2 build: required
+#                     (integration-tests/c64-iec/README.md)
 #   C64_RUN_DIR       where the firmware keeps its state (default: build/c64-run)
-#   VICE_FN_ROOT      the vice-fn checkout
 #   Other arguments go to VICE.
 set -euo pipefail
 
@@ -17,6 +13,10 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh
 source "$SCRIPT_DIR/env.sh"
 
+if [[ -z ${VICE_FN_ROOT:-} ]]; then
+  echo "c64-run: set VICE_FN_ROOT to the vice-fn checkout; see integration-tests/c64-iec/README.md" >&2
+  exit 2
+fi
 boot_disk="$NIO_CORE_APPS/build/c64/disk/boot/autorun.d64"
 launcher="$VICE_FN_ROOT/svn-mirror/fujinet/run-vice-fujinet.sh"
 for needed in "$FUJINET_NIO_C64_NETIEC_BIN" "$boot_disk" "$launcher"; do
