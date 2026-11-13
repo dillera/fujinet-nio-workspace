@@ -15,7 +15,7 @@
 	url = git@github.com:fujinet-nio/fn-rom.git
 [submodule "repos/bounce-world-client-nio"]
 	path = repos/bounce-world-client-nio
-	url = git@github.com:markjfisher/bounce-world-client-nio.git
+	url = git@github.com:fujinet-nio/bounce-world-client-nio.git
 [submodule "repos/fujinet-emulator-bridge"]
 	path = repos/fujinet-emulator-bridge
 	url = git@github.com:markjfisher/fujinet-emulator-bridge.git
@@ -28,13 +28,13 @@
 	branch = bbc-clib
 [submodule "repos/qemu-msdos-init"]
 	path = repos/qemu-msdos-init
-	url = git@github.com:markjfisher/qemu-msdos-init.git
+	url = git@github.com:fujinet-nio/qemu-msdos-init.git
 [submodule "repos/fujinet-nio-driver"]
 	path = repos/fujinet-nio-driver
 	url = git@github.com:fujinet-nio/fujinet-nio-driver.git
 [submodule "repos/cc65-clib"]
 	path = repos/cc65-clib
-	url = git@github.com:markjfisher/cc65-clib.git
+	url = git@github.com:fujinet-nio/cc65-clib.git
 [submodule "repos/nio-core-apps"]
 	path = repos/nio-core-apps
 	url = git@github.com:fujinet-nio/nio-core-apps.git
@@ -43,7 +43,7 @@
 	url = git@github.com:markjfisher/nio-config.git
 [submodule "repos/fujinet-nio-hardware"]
 	path = repos/fujinet-nio-hardware
-	url = git@github.com:markjfisher/fujinet-nio-hardware.git
+	url = git@github.com:fujinet-nio/fujinet-nio-hardware.git
 [submodule "repos/MyPicoDOS"]
 	path = repos/MyPicoDOS
 	url = https://github.com/markjfisher/MyPicoDOS.git
