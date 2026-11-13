@@ -1008,9 +1008,10 @@ def run_amiga_case(amiga_environment: dict[str, str],
             )
             app = driver_build_dir / case["app"]
         else:
-            app_dir = ROOT / "repos" / (
-                "nio-apps" if case["project"] == "apps" else "nio-core-apps"
-            ) / "build" / "amiga"
+            app_dir = ROOT / "repos" / {
+                "apps": "nio-apps",
+                "config": "nio-config",
+            }.get(case["project"], "nio-core-apps") / "build" / "amiga"
             if artifact_profile:
                 app_dir /= artifact_profile
             app_dir /= "bin"
@@ -1047,6 +1048,13 @@ def run_amiga_case(amiga_environment: dict[str, str],
         host_root.mkdir(parents=True, exist_ok=True)
         if completion_mode == "nio_marker":
             (host_root / "amiga-e2e-complete" / name).mkdir(parents=True, exist_ok=True)
+        if case.get("big_dir"):
+            # More entries than config-nio's table holds, with a directory that
+            # sorts last by name but must be listed first.
+            big = host_root / "big"
+            (big / "zdir").mkdir(parents=True, exist_ok=True)
+            for n in range(300):
+                (big / f"f{n:03d}.txt").write_text("x")
         if case.get("driver") and not case.get("nio_broker"):
             # scripts/amiga-artifacts above has already built this case's
             # profile.  Rebuilding the driver's historical generic output

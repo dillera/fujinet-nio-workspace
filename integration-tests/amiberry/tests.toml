@@ -1599,3 +1599,37 @@ results = [
   "leak-ops.result",
   "leak-cycles.result",
 ]
+
+[[test]]
+name = "config-nio"
+project = "config"
+app = "config-nio"
+environments = ["wb32", "wb31", "wb13"]
+driver = true
+big_dir = true
+no_static_mountlists = true
+timeout = 180
+activity_timeout = 150
+no_activity_timeout = 90
+startup = "startup/config-nio.sequence"
+driver_tools = ["fujinet-nio-exchange"]
+completion_mode = "nio_marker"
+completion_log = "host:/amiga-e2e-complete/config-nio"
+results = [
+  "cfg-load.result",
+  "cfg-accept.result",
+  "cfg-fill.result",
+  "cfg-reload.result",
+  "cfg-big.result",
+  "cfg-media.result",
+]
+
+[test.environment_variants.wb13]
+startup = "startup/config-nio-wb13.sequence"
+# The WB1.3 guest takes about 155 s to reach its marker on a slower machine;
+# these limits only bound the local harness wait, so leave headroom.
+activity_timeout = 240
+timeout = 300
+startup_target = "S/StartupII"
+amiga_artifact_profile = "wb13"
+wb13_mountlist = true

@@ -116,6 +116,8 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="amiga-test-disk-") as temp:
         shutil.copy2(args.base_hdf, args.output)
+        # The base HDF is read-only; the disposable copy must be writable.
+        args.output.chmod(0o644)
 
         # Read the requested startup file. Most environments use the primary
         # Startup-Sequence; WB1.3 media may delegate its early boot work to a
