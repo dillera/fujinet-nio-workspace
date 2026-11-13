@@ -10,7 +10,8 @@ From the workspace root:
 
 ```sh
 source scripts/env.sh
-export VICE_FN_ROOT=~/vice-fn          # see below
+git submodule update --init external/vice-fn   # once: VICE, see below
+scripts/build-vice-fn.sh headless              # once
 ./scripts/build.sh c64
 python3 integration-tests/c64-iec/run_boot_acceptance.py
 ```
@@ -23,14 +24,16 @@ pass, 1 on a failure, and 2 when something it needs is missing.
 - **Docker**, for `tnfsd`: the `zaqu/tnfsd` image the firmware's test services use, pinned
   by digest. The test reaches it over TCP, because Docker Desktop's published UDP ports
   don't reach the daemon on macOS.
-- **The `vice-fn` build of VICE**, with `VICE_FN_ROOT` set to it (below).
+- **The `vice-fn` build of VICE**, from the opt-in `external/vice-fn` submodule (below).
+  Stock VICE can't reach the firmware.
 - **The firmware**, `repos/fujinet-nio/build/c64-netiec-debug/fujinet-nio`.
 - **The boot disk**, `repos/nio-core-apps/build/c64/disk/boot/autorun.d64`, which holds
   the config app and the demo. `./scripts/build.sh c64` builds it and the firmware. It needs
   cc65, and Python with PyYAML.
 
-`--firmware`, `--boot-disk` and `--vice-root` point it elsewhere. `--window` uses the SDL
-build so you can watch. `--netiec-port` and `--monitor-port` let it run beside another VICE.
+`--firmware`, `--boot-disk`, `--vice-root` and `--vice-build` point it elsewhere. `--window`
+uses the SDL build so you can watch. `--netiec-port` and `--monitor-port` let it run beside
+another VICE.
 
 ## vice-fn
 
@@ -41,33 +44,33 @@ through the traps, so device 30, NIO's packet channel, is reachable. It also add
 `fujinet/opencbm-netiec`, an OpenCBM library that carries those calls to NetIEC over TCP,
 which is what the firmware's `c64-netiec` presets serve.
 
-This test last passed at `7f4e5520f2`. The VICE source change is `65abb661a3`, "Let real
-devices use units 12-30 through the KERNAL traps".
-
-`VICE_FN_ROOT` is a folder holding the clone and its builds:
-
-```text
-$VICE_FN_ROOT/svn-mirror       the clone, on the vice-fn branch
-$VICE_FN_ROOT/build-headless   --enable-headlessui: what the test uses
-$VICE_FN_ROOT/build-sdl2       --enable-sdl2ui: for --window and scripts/c64-run
-```
-
-On macOS (`brew install xa dos2unix bison`):
+`external/vice-fn` pins that fork at `7f4e5520f2`, where this test last passed. The VICE
+source change is `65abb661a3`, "Let real devices use units 12-30 through the KERNAL traps".
+Like everything under `external/`, it's opt-in: a normal `--recurse-submodules` clone and
+`scripts/update-all.sh` skip it. To get it and build it:
 
 ```sh
-git clone --branch vice-fn --single-branch https://github.com/dillera/vice-fn.git "$VICE_FN_ROOT/svn-mirror"
-(cd "$VICE_FN_ROOT/svn-mirror/vice" && ./autogen.sh)
-for ui in headless sdl2; do
-  mkdir -p "$VICE_FN_ROOT/build-$ui"
-  (cd "$VICE_FN_ROOT/build-$ui" &&
-   ../svn-mirror/vice/configure --enable-${ui}ui --disable-pdf-docs --disable-html-docs \
-       YACC="$(brew --prefix bison)/bin/bison -y" &&
-   make -j)
-done
+git submodule update --init external/vice-fn
+scripts/build-vice-fn.sh                       # both UIs; or name one: headless, sdl2
 ```
 
-The launcher, `svn-mirror/fujinet/run-vice-fujinet.sh`, builds the bridge the first time it
-runs. It has only been built and run on macOS.
+The script runs VICE's `autogen.sh` in the checkout, configures each UI out of tree, and
+builds the `opencbm-netiec` bridge. A rerun only rebuilds what changed.
+
+```text
+build/vice-fn/headless   --enable-headlessui: what the test uses
+build/vice-fn/sdl2       --enable-sdl2ui: for --window and scripts/c64-run
+```
+
+It needs autoconf, automake, pkg-config, xa, dos2unix and GNU bison, and SDL2 and
+SDL2_image for the window. On macOS:
+`brew install autoconf automake pkgconf xa dos2unix bison sdl2 sdl2_image`. It has only
+been built and run on macOS.
+
+`autogen.sh` leaves its output in the checkout as untracked files; `ignore = untracked` in
+`.gitmodules` keeps them out of the workspace's `git status`. `VICE_FN_ROOT` and
+`VICE_FN_BUILD`, which `scripts/env.sh` sets to `external/vice-fn` and `build/vice-fn`,
+point the script, the test and `scripts/c64-run` at another checkout or build.
 
 ## What it proves, and what it can't
 

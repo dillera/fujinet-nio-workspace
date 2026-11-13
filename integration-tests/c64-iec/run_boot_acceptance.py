@@ -250,23 +250,27 @@ def main() -> int:
                         default=WORKSPACE / "repos" / "fujinet-nio" / "build" / "c64-netiec-debug" / "fujinet-nio")
     parser.add_argument("--boot-disk", type=Path,
                         default=WORKSPACE / "repos" / "nio-core-apps" / "build" / "c64" / "disk" / "boot" / "autorun.d64")
-    parser.add_argument("--vice-root", type=Path, default=os.environ.get("VICE_FN_ROOT") or None,
-                        help="the vice-fn checkout (default: $VICE_FN_ROOT)")
+    parser.add_argument("--vice-root", type=Path,
+                        default=os.environ.get("VICE_FN_ROOT") or WORKSPACE / "external" / "vice-fn",
+                        help="the vice-fn checkout (default: $VICE_FN_ROOT, else external/vice-fn)")
+    parser.add_argument("--vice-build", type=Path,
+                        default=os.environ.get("VICE_FN_BUILD") or WORKSPACE / "build" / "vice-fn",
+                        help="its builds, from scripts/build-vice-fn.sh (default: $VICE_FN_BUILD, else build/vice-fn)")
     parser.add_argument("--window", action="store_true", help="use the windowed VICE build")
     parser.add_argument("--load-timeout", type=float, default=120.0, help="seconds to allow for loading the config app")
     parser.add_argument("--netiec-port", type=int, default=NETIEC_PORT, help="for the firmware and VICE's bridge")
     parser.add_argument("--monitor-port", type=int, default=6502, help="VICE's binary monitor")
     args = parser.parse_args()
 
-    if args.vice_root is None:
-        print(f"set VICE_FN_ROOT, or pass --vice-root, to the vice-fn checkout: see {README}", file=sys.stderr)
-        return 2
-    vice_config = ViceConfig(root=Path(args.vice_root), units=(8, 9, 30), headless=not args.window,
+    vice_config = ViceConfig(root=Path(args.vice_root), build=Path(args.vice_build), units=(8, 9, 30),
+                             headless=not args.window,
                              netiec_port=args.netiec_port, monitor_port=args.monitor_port)
     for path, what in ((args.firmware, "firmware (scripts/build.sh c64)"),
                        (args.boot_disk, "boot disk (scripts/build.sh c64)"),
-                       (vice_config.launcher, f"the vice-fn checkout (see {README})"),
-                       (vice_config.build_dir / "src" / "x64sc", f"this VICE build (see {README})")):
+                       (vice_config.launcher,
+                        f"the vice-fn checkout (git submodule update --init external/vice-fn; see {README})"),
+                       (vice_config.build_dir / "src" / "x64sc",
+                        f"this VICE build (scripts/build-vice-fn.sh {vice_config.build_dir.name}; see {README})")):
         if not path.exists():
             print(f"missing {what}: {path}", file=sys.stderr)
             return 2

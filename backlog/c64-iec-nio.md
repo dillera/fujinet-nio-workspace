@@ -64,6 +64,7 @@ scripts/build.sh c64
 python3 integration-tests/c64-iec/run_boot_acceptance.py
 ```
 
-Needs Docker for `tnfsd`, and the `vice-fn` build of VICE in `VICE_FN_ROOT`: see
+Needs Docker for `tnfsd`, and the `vice-fn` build of VICE from the opt-in
+`external/vice-fn` submodule (`scripts/build-vice-fn.sh`): see
 `integration-tests/c64-iec/README.md`. Evidence, with a picture of each screen, goes to
 `test-evidence/c64-iec/`.

@@ -6,7 +6,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-from c64_emulator.vice import KEY_RETURN, petscii, screen_code_to_text, write_png
+from c64_emulator.vice import KEY_RETURN, ViceConfig, petscii, screen_code_to_text, write_png
 
 
 class PetsciiTests(unittest.TestCase):
@@ -93,6 +93,19 @@ class WritePngTests(unittest.TestCase):
         self.assertEqual((compression, filtering, interlace), (0, 0, 0))
         # Each row is stored with filter type 0 in front of it.
         self.assertEqual(zlib.decompress(chunks[1][1]), b"\0" + rows[0] + b"\0" + rows[1])
+
+
+class ViceConfigTests(unittest.TestCase):
+    # The layout scripts/build-vice-fn.sh makes: the launcher in the external/vice-fn
+    # checkout, each UI built out of tree beside the other.
+    def test_launcher_is_in_the_checkout(self):
+        config = ViceConfig(root=Path("/ws/external/vice-fn"), build=Path("/ws/build/vice-fn"))
+        self.assertEqual(config.launcher, Path("/ws/external/vice-fn/fujinet/run-vice-fujinet.sh"))
+
+    def test_headless_by_default_and_sdl2_for_a_window(self):
+        root, build = Path("/ws/external/vice-fn"), Path("/ws/build/vice-fn")
+        self.assertEqual(ViceConfig(root=root, build=build).build_dir, build / "headless")
+        self.assertEqual(ViceConfig(root=root, build=build, headless=False).build_dir, build / "sdl2")
 
 
 if __name__ == "__main__":

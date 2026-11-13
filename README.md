@@ -29,6 +29,7 @@ fujinet-nio-workspace/
   external/
     palmdev-toolchain/           # Palm OS toolchain by another project; opt-in, see below
     PDCurses/                    # curses library for the MS-DOS nio-config; opt-in, see below
+    vice-fn/                     # VICE that reaches FujiNet's C64 devices, for the C64 tests; opt-in
   scripts/
   docs/
   backlog/
@@ -80,6 +81,19 @@ The MS-DOS `nio-config` links PDCurses, which `scripts/build-pdcurses-msdos.sh` 
 git submodule update --init external/PDCurses
 scripts/build-pdcurses-msdos.sh
 ```
+
+### VICE for the C64 tests
+
+The C64 acceptance test and `scripts/c64-run` need `vice-fn`, a fork of VICE whose
+real-device support reaches the firmware's IEC devices over NetIEC; stock VICE can't.
+`scripts/build-vice-fn.sh` builds it into `build/vice-fn/`:
+
+```sh
+git submodule update --init external/vice-fn
+scripts/build-vice-fn.sh
+```
+
+What it needs, and what the test proves: `integration-tests/c64-iec/README.md`.
 
 ### Reference checkouts
 

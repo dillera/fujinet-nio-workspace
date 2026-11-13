@@ -109,7 +109,8 @@ def write_png(path: Path, width: int, height: int, rgb_rows: list[bytes]) -> Non
 
 @dataclass(frozen=True)
 class ViceConfig:
-    root: Path                       # the vice-fn checkout: svn-mirror/, build-headless/, ...
+    root: Path                       # the vice-fn checkout (external/vice-fn)
+    build: Path                      # its builds, headless/ and sdl2/ (scripts/build-vice-fn.sh)
     units: tuple[int, ...] = (8, 30)
     monitor_port: int = 6502
     headless: bool = True
@@ -117,11 +118,11 @@ class ViceConfig:
 
     @property
     def launcher(self) -> Path:
-        return self.root / "svn-mirror" / "fujinet" / "run-vice-fujinet.sh"
+        return self.root / "fujinet" / "run-vice-fujinet.sh"
 
     @property
     def build_dir(self) -> Path:
-        return self.root / ("build-headless" if self.headless else "build-sdl2")
+        return self.build / ("headless" if self.headless else "sdl2")
 
 
 class Vice:

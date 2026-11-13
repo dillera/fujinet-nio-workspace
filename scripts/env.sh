@@ -59,6 +59,8 @@ setup_nio_environment() {
   # Opt-in third-party tools: git submodule update --init external/<name>
   export PALMDEV_TOOLCHAIN="${PALMDEV_TOOLCHAIN:-$NIO_WORKSPACE/external/palmdev-toolchain}"
   export PDCURSES_DIR="${PDCURSES_DIR:-$NIO_WORKSPACE/external/PDCurses}"
+  # vice-fn, the VICE the C64 tests use; scripts/build-vice-fn.sh builds it into VICE_FN_BUILD.
+  export VICE_FN_ROOT="${VICE_FN_ROOT:-$NIO_WORKSPACE/external/vice-fn}"
 
   if [ -f "$NIO_WORKSPACE/local/config.env" ]; then
     # shellcheck source=/dev/null
@@ -112,8 +114,7 @@ setup_nio_environment() {
   export NIO_CONFIG_MSDOS_BIN="${NIO_CONFIG_MSDOS_BIN:-$NIO_CONFIG/build/msdos/bin}"
   export NIO_CONFIG_ATARI_BIN="${NIO_CONFIG_ATARI_BIN:-$NIO_CONFIG/build/atari/bin}"
   export NIO_CONFIG_C64_BIN="${NIO_CONFIG_C64_BIN:-$NIO_CONFIG/build/c64/bin}"
-  # VICE_FN_ROOT has no default: set it to your vice-fn checkout, the VICE build whose
-  # real-device support reaches FujiNet over NetIEC (integration-tests/c64-iec/README.md).
+  export VICE_FN_BUILD="${VICE_FN_BUILD:-$NIO_BUILD_DIR/vice-fn}"
   export FUJINET_NIO_C64_NETIEC_BIN="${FUJINET_NIO_C64_NETIEC_BIN:-$FUJINET_NIO/build/c64-netiec-debug/fujinet-nio}"
   export PDCURSES_MSDOS_LIB="${PDCURSES_MSDOS_LIB:-$NIO_BUILD_DIR/pdcurses/msdos-small/pdcurses.lib}"
 

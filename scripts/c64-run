@@ -3,8 +3,10 @@
 #
 # Build first: scripts/build.sh c64. Then on the C64: LOAD"*",8,1 and RUN.
 #
-#   VICE_FN_ROOT      the vice-fn checkout, with its build-sdl2 build: required
-#                     (integration-tests/c64-iec/README.md)
+#   VICE_FN_ROOT      the vice-fn checkout (default: external/vice-fn)
+#   VICE_FN_BUILD     its builds; this uses sdl2/ (default: build/vice-fn). Get and build
+#                     it: git submodule update --init external/vice-fn, then
+#                     scripts/build-vice-fn.sh sdl2 (integration-tests/c64-iec/README.md)
 #   C64_RUN_DIR       where the firmware keeps its state (default: build/c64-run)
 #   Other arguments go to VICE.
 set -euo pipefail
@@ -13,15 +15,17 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env.sh
 source "$SCRIPT_DIR/env.sh"
 
-if [[ -z ${VICE_FN_ROOT:-} ]]; then
-  echo "c64-run: set VICE_FN_ROOT to the vice-fn checkout; see integration-tests/c64-iec/README.md" >&2
-  exit 2
-fi
 boot_disk="$NIO_CORE_APPS/build/c64/disk/boot/autorun.d64"
-launcher="$VICE_FN_ROOT/svn-mirror/fujinet/run-vice-fujinet.sh"
-for needed in "$FUJINET_NIO_C64_NETIEC_BIN" "$boot_disk" "$launcher"; do
+launcher="$VICE_FN_ROOT/fujinet/run-vice-fujinet.sh"
+vice_build="$VICE_FN_BUILD/sdl2"
+for needed in "$FUJINET_NIO_C64_NETIEC_BIN" "$boot_disk" "$launcher" "$vice_build/src/x64sc"; do
   if [[ ! -e $needed ]]; then
     echo "c64-run: missing $needed" >&2
+    case $needed in
+      "$launcher") echo "c64-run: git submodule update --init external/vice-fn" >&2 ;;
+      "$vice_build"/*) echo "c64-run: scripts/build-vice-fn.sh sdl2" >&2 ;;
+      *) echo "c64-run: scripts/build.sh c64" >&2 ;;
+    esac
     exit 2
   fi
 done
@@ -44,4 +48,4 @@ trap 'kill "$firmware" 2>/dev/null || true' EXIT
 echo "c64-run: firmware log: $run_dir/firmware.log"
 
 # Drives D1-D4 as units 8-11, and the firmware's NIO device.
-FUJINET_UNITS="8 9 10 11 30" "$launcher" -default "$@" 3<&-
+VICE_BUILD="$vice_build" FUJINET_UNITS="8 9 10 11 30" "$launcher" -default "$@" 3<&-
